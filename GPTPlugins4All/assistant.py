@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Assistant:
-    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, event_listener=None, openai_key=None):
+    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, event_listener=None, openai_key=None, files=None,code_interpreter=False, retrieval=False, is_json=None):
         try:
             from openai import OpenAI
         except ImportError:
@@ -26,14 +26,16 @@ class Assistant:
         self.event_listener = event_listener
         self.assistant_id = assistant_id
         self.thread_id = thread_id
+        if is_json is not None:
+            self.is_json = is_json
         if openai_key is None:
             self.openai_client = OpenAI()
         else:
-            self.openai_client = OpenAI(openai_key)
-        self.assistant, self.thread = self.create_assistant_and_thread()
+            self.openai_client = OpenAI(api_key=openai_key)
+        self.assistant, self.thread = self.create_assistant_and_thread(files=files, code_interpreter=code_interpreter, retrieval=retrieval)
 
     # Create an OpenAI assistant and a thread for interactions
-    def create_assistant_and_thread(self):
+    def create_assistant_and_thread(self, files=None, code_interpreter=False, retrieval=False):
         # Extract tools from the configs
         tools = []
         model_descriptions = []
@@ -71,12 +73,35 @@ class Assistant:
             else:
                 thread = self.openai_client.beta.threads.create()
         else:
-            assistant = self.openai_client.beta.assistants.create(
+            file_ids = None
+            if files is not None:
+                file_ids = []
+                for file in files:
+                    file = self.openai_client.create(
+                        file = open(file, 'rb'),
+                        purpose='assistants'
+                    )
+                    file_ids.append(file.id)
+            if code_interpreter:
+                tools.append({"type": "code_interpreter"})
+            if retrieval:
+                tools.append({"type": "retrieval"})
+            assistant = None
+            if file_ids is not None:
+                assistant = self.openai_client.beta.assistants.create(
                 name=self.name,
                 instructions=self.instructions+desc_string,
                 model=self.model,
                 tools=tools,
+                file_ids=file_ids if file_ids is not None else None 
             )
+            else:
+                assistant = self.openai_client.beta.assistants.create(
+                    name=self.name,
+                    instructions=self.instructions+desc_string,
+                    model=self.model,
+                    tools=tools,
+                )
             self.assistant_id = assistant.id
             thread = self.openai_client.beta.threads.create()
             self.thread_id = thread.id
@@ -124,7 +149,10 @@ class Assistant:
                 for tool_call in tool_calls:
                     #print(tool_call)
                     if self.event_listener is not None:
-                        self.event_listener(tool_call)
+                        tool_call_dict = tool_call.__dict__.copy()
+                        tool_call_dict['function'] = str(tool_call_dict['function'])
+                        print(tool_call_dict)
+                        self.event_listener(tool_call_dict)
                     if tool_call.type == "function":
                         user_token = None
                         if user_tokens is not None:
