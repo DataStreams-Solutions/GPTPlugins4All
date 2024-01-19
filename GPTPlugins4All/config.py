@@ -20,15 +20,19 @@ class Config:
     #cache_file = 'search_cache.json'
     #cache file should be in hidden folder
     #make folder if it doesn't exist
-    if not os.path.exists(os.path.join(os.path.expanduser('~'), '.gpt-plugins-4all')):
-        os.makedirs(os.path.join(os.path.expanduser('~'), '.gpt-plugins-4all'))
-    cache_file = os.path.join(os.path.expanduser('~'), '.gpt-plugins-4all', 'search_cache.json')
     
     
-    def __init__(self, input_value, api_key=None, validate=False, name=None):
+    
+    def __init__(self, input_value, api_key=None, validate=False, name=None, use_cache=True):
         self.spec_string = None
         self.model_description = None
         self.is_json = None
+        if use_cache:
+            cache_dir = os.path.join(os.path.expanduser('~'), '.gpt-plugins-4all')
+            if not os.path.exists(cache_dir):
+                os.makedirs(cache_dir)
+            cache_file = os.path.join(cache_dir, 'search_cache.json')
+            self.use_cache = True
         if self.is_valid_spec_string(input_value):
             # Input is a spec string
             self.spec_string = input_value
@@ -78,15 +82,16 @@ class Config:
       )
     @staticmethod
     def load_cache():
-        if os.path.exists(Config.cache_file):
+        if Config.use_cache and os.path.exists(Config.cache_file):
             with open(Config.cache_file, 'r') as file:
                 return json.load(file)
         return []
 
     @staticmethod
     def save_cache(cache_data):
-        with open(Config.cache_file, 'w') as file:
-            json.dump(cache_data, file, indent=4)
+        if Config.use_cache:
+            with open(Config.cache_file, 'w') as file:
+                json.dump(cache_data, file, indent=4)
     @staticmethod
     def fetch_user_configs(api_key):
         if not api_key:
@@ -114,7 +119,7 @@ class Config:
             raise Exception(f"Failed to create config from URL: {response.status_code} - {response.text}")
     @staticmethod
     def search_configs(query, api_key=None, use_cache=True):
-        cached_configs = Config.load_cache()
+        cached_configs = Config.load_cache() if use_cache else []
 
         if use_cache:
             # Search within the cached data
