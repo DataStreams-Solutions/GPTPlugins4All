@@ -32,6 +32,7 @@ class Assistant:
         self.event_listener = event_listener
         self.assistant_id = assistant_id
         self.thread_id = thread_id
+        self.old_mode = old_mode
         if is_json is not None:
             self.is_json = is_json
         if openai_key is None:
