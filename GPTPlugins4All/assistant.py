@@ -196,13 +196,20 @@ class Assistant:
                 desc_string = " Tool information below\n---------------\n" + "\n---------------\n".join(valid_descriptions)
             else:
                 desc_string = ""
-            data_ = {
-                "model": self.model,
-                "messages": [{"role": "system", "content": self.instructions+additional_context+desc_string}] + thread["messages"],
-                "max_tokens": self.max_tokens,
-                "tools": tools,
-                "tool_choice": "auto"
-            }
+            if len(tools) > 0:
+                data_ = {
+                    "model": self.model,
+                    "messages": [{"role": "system", "content": self.instructions+additional_context+desc_string}] + thread["messages"],
+                    "max_tokens": self.max_tokens,
+                    "tools": tools,
+                    "tool_choice": "auto"
+                }
+            else:
+                data_ = {
+                    "model": self.model,
+                    "messages": [{"role": "system", "content": self.instructions+additional_context}] + thread["messages"],
+                    "max_tokens": self.max_tokens
+                }
         else: 
             data_ = {
                 "model": self.model,
