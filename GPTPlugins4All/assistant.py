@@ -50,10 +50,8 @@ class Assistant:
                 raise ValueError("put_thread must be provided if old_mode is True")
             if max_tokens is None:
                 raise ValueError("max_tokens must be provided if old_mode is True")
-            if save_memory is not None:
-                self.save_memory = save_memory
-            if query_memory is not None:
-                self.query_memory = query_memory
+            self.save_memory = save_memory
+            self.query_memory = query_memory
             self.max_messages = max_messages
             self.get_thread = get_thread
             self.put_thread = put_thread
