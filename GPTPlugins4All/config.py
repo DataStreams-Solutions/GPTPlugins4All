@@ -310,8 +310,10 @@ class Config:
         
         if is_json:
             headers['Content-Type'] = 'application/json'
+            print('making json call' + url + str(params) + str(headers))
             response = getattr(requests, method.lower())(url, json=params, headers=headers)
         else:
+            print('making call' + url + str(params) + str(headers))
             response = getattr(requests, method.lower())(url, params=params, headers=headers)
         
         return response
