@@ -33,7 +33,9 @@ def leftTruncate(text, length):
 def scrape_text(url, length):
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 6.2; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36'}
     response = requests.get(url, verify=False, headers=headers)
-
+    #check if length is not an integer, if so, set to 3000
+    if not isinstance(length, int):
+        length = 3000
     # Check if the response contains an HTTP error
     if response.status_code >= 400:
         return "Error: HTTP " + str(response.status_code) + " error"
@@ -52,7 +54,7 @@ def scrape_text(url, length):
 
 
 class Assistant:
-    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, event_listener=None, openai_key=None, files=None,code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}):
+    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}):
         try:
             from openai import OpenAI
         except ImportError:
@@ -108,29 +110,22 @@ class Assistant:
             pass
         else:
             self.assistant, self.thread = self.create_assistant_and_thread(files=files, code_interpreter=code_interpreter, retrieval=retrieval, bot_intro=bot_intro)
+
     def add_file(self, file):
         file = self.openai_client.create(
-            file = open(file, 'rb'),
+            file=open(file, 'rb'),
             purpose='assistants'
         )
         self.openai_client.beta.assistants.update(self.assistant_id, file_ids=[file.id])   
-    # Create an OpenAI assistant and a thread for interactions
+    
     def create_assistant_and_thread(self, files=None, code_interpreter=False, retrieval=False, bot_intro=None):
-        # Extract tools from the configs
         tools = []
         model_descriptions = []
         valid_descriptions = []
         for config in self.configs:
             modified_tools = self.modify_tools_for_config(config)
             for tool in modified_tools:
-                # Add 'is_json' parameter to the parameters of each tool
-                """tool['function']['parameters']['properties']['is_json'] = {
-                    'type': 'boolean', 
-                    'description': "Do with json or not - should be used if errors with Content-Type occur. Should never be used on its own"
-                }"""
                 tools.append(tool)
-                # Include 'is_json' in the required parameters if necessary
-                # tool['function']['parameters']['required'].append('is_json')
             if config.model_description and config.model_description.lower() != "none":
                 valid_descriptions.append(config.model_description)
         if self.search_enabled:
@@ -172,13 +167,12 @@ class Assistant:
         if self.other_tools is not None:
             for tool in self.other_tools:
                 tools.append(tool)
-        print(tools)
-        # Concatenate valid descriptions
+
         if valid_descriptions:
             desc_string = " Tool information below\n---------------\n" + "\n---------------\n".join(valid_descriptions)
         else:
             desc_string = ""
-        # Initialize the OpenAI assistant
+        
         if self.assistant_id is not None:
             assistant = self.openai_client.beta.assistants.retrieve(self.assistant_id)
             if self.thread_id is not None:
@@ -186,55 +180,39 @@ class Assistant:
                 runs = self.openai_client.beta.threads.runs.list(self.thread_id)
                 if len(runs.data) > 0:
                     latest_run = runs.data[0]
-                    if(latest_run.status == "in_progress" or latest_run.status == "queued" or latest_run.status == "requires_action"):
-                        run = self.openai_client.beta.threads.runs.cancel(thread_id=self.thread_id, run_id = latest_run.id)
-                        print('cancelled run')
+                    if latest_run.status in ["in_progress", "queued", "requires_action"]:
+                        run = self.openai_client.beta.threads.runs.cancel(thread_id=self.thread_id, run_id=latest_run.id)
+                        print('Cancelled run')
             else:
                 thread = None
                 if bot_intro is not None:
-                    thread = self.openai_client.beta.threads.create(messages=[{"role": "user", "content": "Before the thread, you said "+bot_intro}])
+                    thread = self.openai_client.beta.threads.create(messages=[{"role": "user", "content": "Before the thread, you said " + bot_intro}])
                 else:
                     thread = self.openai_client.beta.threads.create()
         else:
-            file_ids = None
+            tool_resources = {"file_search": {"vector_store_ids": []}, "code_interpreter": {"file_ids": []}}
             if files is not None:
-                file_ids = []
                 for file in files:
-                    file = self.openai_client.create(
-                        file = open(file, 'rb'),
-                        purpose='assistants'
-                    )
-                    file_ids.append(file.id)
+                    file_obj = self.openai_client.create(file=open(file, 'rb'), purpose='assistants')
+                    tool_resources["code_interpreter"]["file_ids"].append(file_obj.id)
             if code_interpreter:
                 tools.append({"type": "code_interpreter"})
             if retrieval:
-                tools.append({"type": "retrieval"})
-            assistant = None
-            if file_ids is not None:
-                assistant = self.openai_client.beta.assistants.create(
+                tools.append({"type": "file_search"})
+            assistant = self.openai_client.beta.assistants.create(
                 name=self.name,
-                instructions=self.instructions+desc_string,
+                instructions=self.instructions + desc_string,
                 model=self.model,
                 tools=tools,
-                file_ids=file_ids if file_ids is not None else None 
+                tool_resources=tool_resources
             )
-            else:
-                assistant = self.openai_client.beta.assistants.create(
-                    name=self.name,
-                    instructions=self.instructions+desc_string,
-                    model=self.model,
-                    tools=tools,
-                )
             self.assistant_id = assistant.id
-            thread = None
             if bot_intro is not None:
-                thread = self.openai_client.beta.threads.create(messages=[{"role": "user", "content": "Before the thread, you said "+bot_intro}])
+                thread = self.openai_client.beta.threads.create(messages=[{"role": "user", "content": "Before the thread, you said " + bot_intro}])
             else:
                 thread = self.openai_client.beta.threads.create()
             self.thread_id = thread.id
-            #print("Thread ID: save this for persistence: "+thread.id)
 
-        # Create a thread for the assistant
         return assistant, thread
 
     def modify_tools_for_config(self, config):
@@ -716,7 +694,7 @@ class Assistant:
             other_tool_names = [tool['function']['name'] for tool in self.other_tools]
             if function_name in other_tool_names:
                 func_to_call = self.other_functions[function_name]
-                return func_to_call(**arguments)
+                return func_to_call(x)
         if self.multiple_configs and '-' in function_name:
             config_name, actual_function_name = function_name.split('-', 1)
             config = next((cfg for cfg in self.configs if cfg.name == config_name), None)
