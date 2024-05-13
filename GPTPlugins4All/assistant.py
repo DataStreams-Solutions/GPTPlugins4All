@@ -18,11 +18,12 @@ def search_google(query):
     search_results = []
     res_string = ""
 
-    for j in search(query,num_results=6, advanced=True):#search(query, tld="co.in", num=10, stop=10, pause=2):
+    for j in search(query, num_results=6, advanced=True):
         search_results.append(j)
-        res_string += j.url+" - "+j.title+" - "+j.description
+        res_string += j.url + " - " + j.title + " - " + j.description
         res_string += "\n\n"
-    return "Results from google search: "+query+"\n"+res_string
+    return "Results from google search: " + query + "\n" + res_string
+
 def leftTruncate(text, length):
     encoded = encoding.encode(text)
     num = len(encoded)
@@ -30,13 +31,12 @@ def leftTruncate(text, length):
         return encoding.decode(encoded[num - length:])
     else:
         return text
+
 def scrape_text(url, length):
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 6.2; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36'}
     response = requests.get(url, verify=False, headers=headers)
-    #check if length is not an integer, if so, set to 3000
     if not isinstance(length, int):
         length = 3000
-    # Check if the response contains an HTTP error
     if response.status_code >= 400:
         return "Error: HTTP " + str(response.status_code) + " error"
 
@@ -116,7 +116,7 @@ class Assistant:
             file=open(file, 'rb'),
             purpose='assistants'
         )
-        self.openai_client.beta.assistants.update(self.assistant_id, file_ids=[file.id])   
+        self.openai_client.beta.assistants.update(self.assistant_id, tool_resources={"code_interpreter": {"file_ids": [file.id]}})
     
     def create_assistant_and_thread(self, files=None, code_interpreter=False, retrieval=False, bot_intro=None):
         tools = []
@@ -173,6 +173,12 @@ class Assistant:
         else:
             desc_string = ""
         
+        tool_resources = {"file_search": {"vector_store_ids": []}, "code_interpreter": {"file_ids": []}}
+        if files is not None:
+            for file in files:
+                file_obj = self.openai_client.create(file=open(file, 'rb'), purpose='assistants')
+                tool_resources["code_interpreter"]["file_ids"].append(file_obj.id)
+        
         if self.assistant_id is not None:
             assistant = self.openai_client.beta.assistants.retrieve(self.assistant_id)
             if self.thread_id is not None:
@@ -190,11 +196,6 @@ class Assistant:
                 else:
                     thread = self.openai_client.beta.threads.create()
         else:
-            tool_resources = {"file_search": {"vector_store_ids": []}, "code_interpreter": {"file_ids": []}}
-            if files is not None:
-                for file in files:
-                    file_obj = self.openai_client.create(file=open(file, 'rb'), purpose='assistants')
-                    tool_resources["code_interpreter"]["file_ids"].append(file_obj.id)
             if code_interpreter:
                 tools.append({"type": "code_interpreter"})
             if retrieval:
@@ -225,11 +226,11 @@ class Assistant:
             return modified_tools
         else:
             return config.generate_tools_representation()
+
     def handle_old_mode(self, user_message, user_tokens=None):
         if self.thread_id is None:
             self.thread_id = str(uuid.uuid4())
         print('not streaming')
-        # Get the current thread
         thread = self.get_thread(self.thread_id)
         if thread is None:
             thread = {"messages": []}
@@ -239,11 +240,11 @@ class Assistant:
             thread["messages"] = thread["messages"][-self.max_messages:]
         additional_context = ""
         if self.query_memory is not None:
-            additional_context = self.query_memory(self.thread_id, user_message,self.openai_client)
+            additional_context = self.query_memory(self.thread_id, user_message, self.openai_client)
         if additional_context is not None:
-            additional_context ="\nInformation from the past that may be relevant: "+additional_context
+            additional_context = "\nInformation from the past that may be relevant: " + additional_context
         if self.has_file:
-            additional_context += "Information from knowledge base: "+self.read_file(self.file_identifier, user_message, self.openai_client)
+            additional_context += "Information from knowledge base: " + self.read_file(self.file_identifier, user_message, self.openai_client)
         tools = []
         if self.search_enabled:
             tools.append({
@@ -291,25 +292,14 @@ class Assistant:
             for config in self.configs:
                 modified_tools = self.modify_tools_for_config(config)
                 for tool in modified_tools:
-                    # Add 'is_json' parameter to the parameters of each tool
-                    """tool['function']['parameters']['properties']['is_json'] = {
-                        'type': 'boolean', 
-                        'description': "Do with json or not - should be used if errors with Content-Type occur. Should never be used on its own"
-                    }"""
                     tools.append(tool)
-                    # Include 'is_json' in the required parameters if necessary
-                    # tool['function']['parameters']['required'].append('is_json')
                 if config.model_description and config.model_description.lower() != "none":
                     valid_descriptions.append(config.model_description)
             desc_string = ""
-            #if valid_descriptions:
-            #    desc_string = " Tool information below\n---------------\n" + "\n---------------\n".join(valid_descriptions)
-            #else:
-            #    desc_string = ""
             if len(tools) > 0:
                 data_ = {
                     "model": self.model,
-                    "messages": [{"role": "system", "content": self.instructions+additional_context+desc_string}] + thread["messages"],
+                    "messages": [{"role": "system", "content": self.instructions + additional_context + desc_string}] + thread["messages"],
                     "max_tokens": self.max_tokens,
                     "tools": tools,
                     "tool_choice": "auto"
@@ -317,53 +307,21 @@ class Assistant:
             else:
                 data_ = {
                     "model": self.model,
-                    "messages": [{"role": "system", "content": self.instructions+additional_context}] + thread["messages"],
+                    "messages": [{"role": "system", "content": self.instructions + additional_context}] + thread["messages"],
                     "max_tokens": self.max_tokens
                 }
-        else: 
+        else:
             data_ = {
                 "model": self.model,
-                "messages": [{"role": "system", "content": self.instructions+additional_context}] + thread["messages"],
+                "messages": [{"role": "system", "content": self.instructions + additional_context}] + thread["messages"],
                 "max_tokens": self.max_tokens
             }
-        """if self.streaming == True:
-            data_['stream'] =True"""
         completion = self.openai_client.chat.completions.create(**data_)
-        """if self.streaming == True:
-            func_call = {"name": "", "arguments": ""}
-            response_text = ""
-            function_call_detected = False
-            for response_chunk in completion:
-                if "choices" in response_chunk:
-                    deltas = response_chunk["choices"][0]["delta"]
-                    if "function_call" in deltas:
-                        function_call_detected = True
-                        if "name" in deltas["function_call"]:
-                            func_call["name"] = deltas["function_call"]["name"]
-                        if "arguments" in deltas["function_call"]:
-                            func_call["arguments"] += deltas["function_call"]["arguments"]
-                    if (
-                        function_call_detected
-                        and response_chunk["choices"][0].get("finish_reason") == "function_call"
-                    ):
-                        function_response_generator = self.execute_function(
-                            func_call["name"], func_call["arguments"], user_tokens
-                        )
-                        for function_response_chunk in function_response_generator:
-                            if "choices" in function_response_chunk:
-                                deltas = function_response_chunk["choices"][0]["delta"]
-                                if "content" in deltas:
-                                    response_text += deltas["content"]
-                                    yield response_text
-                    elif "content" in deltas and not function_call_detected:
-                        response_text += deltas["content"]
-                        yield response_text"""
         print(self.configs)
         if self.raw_mode == False:
             while completion.choices[0].message.role == "assistant" and completion.choices[0].message.tool_calls:
                 tool_outputs = []
                 for tool_call in completion.choices[0].message.tool_calls:
-                    # Execute the function associated with the tool
                     result = self.execute_function(tool_call.function.name, tool_call.function.arguments, user_tokens)
                     output = {
                         "tool_call_id": tool_call.id,
@@ -374,34 +332,19 @@ class Assistant:
                     tool_outputs.append(output)
                     if self.event_listener is not None:
                         self.event_listener(output)
-
-                # Resend the completion request with the tool outputs
-                #data_['tool_outputs'] = tool_outputs
-                data_['messages'] = data_['messages']+[{"role": "system", "content": "Tool outputs from most recent attempt"+json.dumps(tool_outputs)+"\n If the above indicates an error, change the input and try again"}]
+                data_['messages'] = data_['messages'] + [{"role": "system", "content": "Tool outputs from most recent attempt" + json.dumps(tool_outputs) + "\n If the above indicates an error, change the input and try again"}]
                 completion = self.openai_client.chat.completions.create(**data_)
-                
 
-        # Extract the response from the completion
         response_message = completion.choices[0].message.content
-
-        # Add the response to the thread
         thread["messages"].append({"role": "assistant", "content": response_message})
-
-        # Save the updated thread
         self.put_thread(self.thread_id, thread["messages"])
-
-        # If save_memory is not None, use it to store the input and output
         if self.save_memory is not None:
-            #use threading to save memory
             threading.Thread(target=self.save_memory, args=(self.thread_id, json.dumps({"input": user_message, "output": response_message}), self.openai_client)).start()
-            #self.save_memory(self.thread_id, json.dumps({"input": user_message, "output": response_message}), self.openai_client)
-
         return response_message
+
     def handle_old_mode_streaming(self, user_message, user_tokens=None):
         if self.thread_id is None:
             self.thread_id = str(uuid.uuid4())
-
-        # Get the current thread
         thread = self.get_thread(self.thread_id)
         if thread is None:
             thread = {"messages": []}
@@ -413,9 +356,9 @@ class Assistant:
             thread["messages"] = thread["messages"][-self.max_messages:]
         additional_context = ""
         if self.query_memory is not None:
-            additional_context = self.query_memory(self.thread_id, user_message,self.openai_client)
+            additional_context = self.query_memory(self.thread_id, user_message, self.openai_client)
         if additional_context is None:
-            additional_context ="\nInformation from the past that may be relevant: "+additional_context
+            additional_context = "\nInformation from the past that may be relevant: " + additional_context
         tools = []
         model_descriptions = []
         valid_descriptions = []
@@ -426,14 +369,7 @@ class Assistant:
             for config in self.configs:
                 modified_tools = self.modify_tools_for_config(config)
                 for tool in modified_tools:
-                    # Add 'is_json' parameter to the parameters of each tool
-                    """tool['function']['parameters']['properties']['is_json'] = {
-                        'type': 'boolean', 
-                        'description': "Do with json or not - should be used if errors with Content-Type occur. Should never be used on its own"
-                    }"""
                     tools.append(tool)
-                    # Include 'is_json' in the required parameters if necessary
-                    # tool['function']['parameters']['required'].append('is_json')
                 if config.model_description and config.model_description.lower() != "none":
                     valid_descriptions.append(config.model_description)
             desc_string = ""
@@ -444,7 +380,7 @@ class Assistant:
             if len(tools) > 0:
                 data_ = {
                     "model": self.model,
-                    "messages": [{"role": "system", "content": self.instructions+additional_context+desc_string}] + thread["messages"],
+                    "messages": [{"role": "system", "content": self.instructions + additional_context + desc_string}] + thread["messages"],
                     "max_tokens": self.max_tokens,
                     "tools": tools,
                     "tool_choice": "auto"
@@ -452,17 +388,16 @@ class Assistant:
             else:
                 data_ = {
                     "model": self.model,
-                    "messages": [{"role": "system", "content": self.instructions+additional_context}] + thread["messages"],
+                    "messages": [{"role": "system", "content": self.instructions + additional_context}] + thread["messages"],
                     "max_tokens": self.max_tokens
                 }
-        else: 
+        else:
             data_ = {
                 "model": self.model,
-                "messages": [{"role": "system", "content": self.instructions+additional_context}] + thread["messages"],
+                "messages": [{"role": "system", "content": self.instructions + additional_context}] + thread["messages"],
                 "max_tokens": self.max_tokens
             }
-
-        data_['stream'] =True
+        data_['stream'] = True
         print(data_)
         print(self.configs)
         completion = self.openai_client.chat.completions.create(**data_)
@@ -470,30 +405,9 @@ class Assistant:
         content = ""
         result = ""
         for response_chunk in completion:
-            #print(response_chunk)
-            
             delta = response_chunk.choices[0].delta
-            #content = response_chunk.choices[0].delta.content
-            #print(content)
             if delta.content is not None:
                 content = delta.content
-            """
-            while completion.choices[0].message.role == "assistant" and completion.choices[0].message.tool_calls:
-                tool_outputs = []
-                for tool_call in completion.choices[0].message.tool_calls:
-                    # Execute the function associated with the tool
-                    result = self.execute_function(tool_call.function.name, tool_call.function.arguments, user_tokens)
-                    output = {
-                        "tool_call_id": tool_call.id,
-                        "output": json.dumps(result)
-                    }
-                    tool_outputs.append(output)
-                    self.event_listener(output)
-
-                # Resend the completion request with the tool outputs
-                data_['tool_outputs'] = tool_outputs
-                completion = self.openai_client.ChatCompletion.create(**data_)
-            """
             while delta.tool_calls:
                 tool_outputs = []
                 tool_calls = {}
@@ -516,102 +430,30 @@ class Assistant:
                     print(output)
                     tool_outputs.append(output)
                     self.event_listener(output)
-                data_['messages'] = data_['messages']+[{"role": "system", "content": "Tool outputs from most recent attempt"+json.dumps(tool_outputs)}]
-                completion = self.openai_client.ChatCompletion.create(**data_)
+                data_['messages'] = data_['messages'] + [{"role": "system", "content": "Tool outputs from most recent attempt" + json.dumps(tool_outputs)}]
+                completion = self.openai_client.chat.completions.create(**data_)
                 delta = completion.choices[0].delta
                 if delta.content is not None:
                     content = delta.content
             if content is not None:
                 result += content
-                if content != "" and content != None:
+                if content != "" and content is not None:
                     yield response_chunk.choices[0].delta.content
             else:
                 print('end of response')
                 yield ""
         thread["messages"].append({"role": "assistant", "content": result})
-
-        # Save the updated thread
         self.put_thread(self.thread_id, thread["messages"])
-
-        # If save_memory is not None, use it to store the input and output
         if self.save_memory is not None:
-            #use threading to save memory
             threading.Thread(target=self.save_memory, args=(self.thread_id, json.dumps({"input": user_message, "output": result}), self.openai_client)).start()
-            #self.save_memory(self.thread_id, json.dumps({"input": user_message, "output": response_message}), self.openai_client)
         return
-        """
-        each chunk looks like this
-        ChatCompletionChunk(id='chatcmpl-8xSrZnWtvRY5CL3Z4mWQ6wSMEKqlf', choices=[Choice(delta=ChoiceDelta(content=None, function_call=None, role=None, tool_calls=None), finish_reason='stop', index=0, logprobs=None)], created=1709182993, model='gpt-3.5-turbo-1106', object='chat.completion.chunk', system_fingerprint='fp_406be318f3')
-        """
-        func_call = {"name": "", "arguments": ""}
-        response_text = ""
-        function_call_detected = False
-        for response_chunk in completion:
-            print(response_chunk)
-            if "choices" in response_chunk:
-                deltas = response_chunk["choices"][0]["delta"]
-                if "function_call" in deltas:
-                    function_call_detected = True
-                    if "name" in deltas["function_call"]:
-                        func_call["name"] = deltas["function_call"]["name"]
-                    if "arguments" in deltas["function_call"]:
-                        func_call["arguments"] += deltas["function_call"]["arguments"]
-                if (
-                    function_call_detected
-                    and response_chunk["choices"][0].get("finish_reason") == "function_call"
-                ):
-                    function_response_generator = self.execute_function(
-                        func_call["name"], func_call["arguments"], user_tokens
-                    )
-                    for function_response_chunk in function_response_generator:
-                        if "choices" in function_response_chunk:
-                            deltas = function_response_chunk["choices"][0]["delta"]
-                            if "content" in deltas:
-                                response_text += deltas["content"]
-                                yield response_text
-                elif "content" in deltas and not function_call_detected:
-                    response_text += deltas["content"]
-                    yield response_text
-        if self.raw_mode == False:
-            while completion.choices[0].message.role == "assistant" and completion.choices[0].message.tool_calls:
-                tool_outputs = []
-                for tool_call in completion.choices[0].message.tool_calls:
-                    # Execute the function associated with the tool
-                    result = self.execute_function(tool_call.function.name, tool_call.function.arguments, user_tokens)
-                    output = {
-                        "tool_call_id": tool_call.id,
-                        "output": json.dumps(result)
-                    }
-                    tool_outputs.append(output)
-                    self.event_listener(output)
 
-                # Resend the completion request with the tool outputs
-                data_['tool_outputs'] = tool_outputs
-                completion = self.openai_client.ChatCompletion.create(**data_)
-                
-
-        # Extract the response from the completion
-        response_message = completion.choices[0].message.content
-
-        # Add the response to the thread
-        thread["messages"].append({"role": "assistant", "content": response_message})
-
-        # Save the updated thread
-        self.put_thread(self.thread_id, thread["messages"])
-
-        # If save_memory is not None, use it to store the input and output
-        if self.save_memory is not None:
-            #use threading to save memory
-            threading.Thread(target=self.save_memory, args=(self.thread_id, json.dumps({"input": user_message, "output": response_message}), self.openai_client)).start()
-            #self.save_memory(self.thread_id, json.dumps({"input": user_message, "output": response_message}), self.openai_client)
-
-        return response_message
-    def get_assistant_response(self,message, user_tokens=None):
+    def get_assistant_response(self, message, user_tokens=None):
         if self.old_mode:
             if self.streaming:
                 return self.handle_old_mode_streaming(message, user_tokens=user_tokens)
             return self.handle_old_mode(message, user_tokens=user_tokens)
-        message = self.openai_client.beta.threads.messages.create(
+        message_obj = self.openai_client.beta.threads.messages.create(
             thread_id=self.thread.id,
             role="user",
             content=message
@@ -619,7 +461,7 @@ class Assistant:
         run = self.openai_client.beta.threads.runs.create(
             thread_id=self.thread.id,
             assistant_id=self.assistant.id,
-            )
+        )
         
         print("Waiting for response")
         print(run.id)
@@ -639,7 +481,6 @@ class Assistant:
                 tool_calls = run_.required_action.submit_tool_outputs.tool_calls
                 tool_outputs = []
                 for tool_call in tool_calls:
-                    #print(tool_call)
                     if self.event_listener is not None:
                         tool_call_dict = tool_call.__dict__.copy()
                         tool_call_dict['function'] = str(tool_call_dict['function'])
@@ -657,8 +498,6 @@ class Assistant:
                             "tool_call_id": tool_call.id,
                             "output": json.dumps(result)
                         }
-                        #print(output)
-                        #put output to event listener if there is one
                         if self.event_listener is not None:
                             self.event_listener(output)
                         tool_outputs.append(output)
@@ -668,16 +507,12 @@ class Assistant:
         messages = self.openai_client.beta.threads.messages.list(thread_id=self.thread.id)
         print(messages.data[0].content[0].text.value)
         return messages.data[0].content[0].text.value
+
     def get_entire_conversation(self):
         messages = self.openai_client.beta.threads.messages.list(thread_id=self.thread.id)
         return messages.data
-    def execute_function(self,function_name, arguments, user_token=None):
-        """Execute a function and return the result."""
-        #example of function_name: "alpha_vantage/query"
-        #config.make_api_call_by_operation_id("genericQuery", params={"function": "TIME_SERIES_DAILY", "symbol": "BTC", "market": "USD"}
-        #config.make_api_call_by_path("/query", "GET", params={"function": "TIME_SERIES_DAILY", "symbol": "BTC", "market": "USD"})
-        #actual implementation of the function
-        #turn arguments into dictionary
+
+    def execute_function(self, function_name, arguments, user_token=None):
         try:
             x = json.loads(arguments)
         except Exception as e:
@@ -715,13 +550,12 @@ class Assistant:
             print(request.status_code)
             print(request.reason)
             try:
-                return request.json()+"\n "+str(request.status_code)+" "+request.reason
+                return request.json() + "\n " + str(request.status_code) + " " + request.reason
             except Exception as e:
-                return request.text+"\n "+str(request.status_code)+" "+request.reason
+                return request.text + "\n " + str(request.status_code) + " " + request.reason
         except Exception as e:
             print(e)
             try:
-                #split the function name into path and method by - eg query-GET
                 split = actual_function_name.split("-")
                 method = split[1]
                 if method.upper() == "GET" or method.upper() == "DELETE":
@@ -732,28 +566,24 @@ class Assistant:
                 print(request.status_code)
                 print(request.reason)
                 print(request.text)
-                #check if response is json
                 try:
-                    return request.json()+"\n "+str(request.status_code)+" "+request.reason
+                    return request.json() + "\n " + str(request.status_code) + " " + request.reason
                 except Exception as e:
-                    return request.text+"\n "+str(request.status_code)+" "+request.reason
+                    return request.text + "\n " + str(request.status_code) + " " + request.reason
             except Exception as e:
                 print(e)
-                #debug stack trace
                 import traceback
                 traceback.print_exc()
                 try:
-                    request = config.make_api_call_by_path('/'+path, method.upper(), params=arguments, is_json=is_json, user_token=user_token)
+                    request = config.make_api_call_by_path('/' + path, method.upper(), params=arguments, is_json=is_json, user_token=user_token)
                     print(request)
-                    
-                    #check if json
                     print(request.text)
                     print(request.status_code)
                     print(request.reason)
                     try:
-                        return request.json()+"\n "+str(request.status_code)+" "+request.reason
+                        return request.json() + "\n " + str(request.status_code) + " " + request.reason
                     except Exception as e:
-                        return request.text+"\n "+str(request.status_code)+" "+request.reason
+                        return request.text + "\n " + str(request.status_code) + " " + request.reason
                 except Exception as e:
                     print(e)
                     return "Error"
