@@ -55,7 +55,7 @@ def scrape_text(url, length):
 
 def encode_image(image_url):
     response = requests.get(image_url)
-    print(response.content)
+    #print(response.content)
     return base64.b64encode(response.content).decode('utf-8')
 
 class Assistant:
@@ -244,7 +244,7 @@ class Assistant:
         content = user_message
         if image_paths is not None:
             for image_path in image_paths:
-                base64_image = encode_image(image_path)
+                #base64_image = encode_image(image_path)
                 content = [{"type": "text", "text": user_message}]
                 content.append({
                     "type": "image_url",
@@ -374,7 +374,6 @@ class Assistant:
         content = [{"type": "text", "text": user_message}]
         if image_paths is not None:
             for image_path in image_paths:
-                base64_image = encode_image(image_path)
                 content.append({
                     "type": "image_url",
                     "image_url": {
@@ -388,96 +387,109 @@ class Assistant:
         additional_context = ""
         if self.query_memory is not None:
             additional_context = self.query_memory(self.thread_id, user_message, self.openai_client)
-        if additional_context is None:
+        if additional_context is not None:
             additional_context = "\nInformation from the past that may be relevant: " + additional_context
+        if self.has_file:
+            additional_context += "Information from knowledge base: " + self.read_file(self.file_identifier, user_message, self.openai_client)
+        
         tools = []
-        model_descriptions = []
-        valid_descriptions = []
-        data_ = {}
-        print(self.raw_mode)
-        if self.raw_mode is False:
-            print('not raw mode')
-            for config in self.configs:
-                modified_tools = self.modify_tools_for_config(config)
-                for tool in modified_tools:
-                    tools.append(tool)
-                if config.model_description and config.model_description.lower() != "none":
-                    valid_descriptions.append(config.model_description)
-            desc_string = ""
-            if valid_descriptions:
-                desc_string = " Tool information below\n---------------\n" + "\n---------------\n".join(valid_descriptions)
-            else:
-                desc_string = ""
-            if len(tools) > 0:
-                data_ = {
-                    "model": self.model,
-                    "messages": [{"role": "system", "content": self.instructions + additional_context + desc_string}] + thread["messages"],
-                    "max_tokens": self.max_tokens,
-                    "tools": tools,
-                    "tool_choice": "auto"
+        if self.search_enabled:
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "search_google",
+                    "description": "Searches Google for a given query",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The search query"
+                            }
+                        },
+                        "required": ["query"]
+                    }
                 }
-            else:
-                data_ = {
-                    "model": self.model,
-                    "messages": [{"role": "system", "content": self.instructions + additional_context}] + thread["messages"],
-                    "max_tokens": self.max_tokens
+            })
+        if self.view_pages:
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "scrape_text",
+                    "description": "Scrapes text from a given URL",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {
+                                "type": "string",
+                                "description": "The URL to scrape"
+                            }
+                        },
+                        "required": ["url"]
+                    }
                 }
-        else:
-            data_ = {
-                "model": self.model,
-                "messages": [{"role": "system", "content": self.instructions + additional_context}] + thread["messages"],
-                "max_tokens": self.max_tokens
-            }
-        data_['stream'] = True
+            })
+        if self.other_tools is not None:
+            for tool in self.other_tools:
+                tools.append(tool)
+        
+        data_ = {
+            "model": self.model,
+            "messages": [{"role": "system", "content": self.instructions + additional_context}] + thread["messages"],
+            "max_tokens": self.max_tokens,
+            "stream": True,
+            "tools": tools,
+            "tool_choice": "auto" if len(tools) > 0 else None
+        }
+
         print(data_)
-        print(self.configs)
         completion = self.openai_client.chat.completions.create(**data_)
         print(completion)
-        content = ""
+
         result = ""
+        tool_calls = {}
+        
         for response_chunk in completion:
             delta = response_chunk.choices[0].delta
             if delta.content is not None:
-                content = delta.content
-            while delta.tool_calls:
+                result += delta.content
+                yield delta.content
+            
+            if delta.tool_calls:
                 tool_outputs = []
-                tool_calls = {}
                 for tool_call in delta.tool_calls:
-                    print(delta.tool_calls)
                     tool_calls[tool_call.id] = tool_call
-                    ready = False
                     try:
-                        json.loads(tool_call.function.arguments)
-                        ready = True
-                    except:
-                        ready = False
-                    if not ready:
-                        continue
-                    result = self.execute_function(tool_call.function.name, tool_call.function.arguments, user_tokens)
-                    output = {
-                        "tool_call_id": tool_call.id,
-                        "output": json.dumps(result)
-                    }
-                    print(output)
-                    tool_outputs.append(output)
-                    self.event_listener(output)
-                data_['messages'] = data_['messages'] + [{"role": "system", "content": "Tool outputs from most recent attempt" + json.dumps(tool_outputs)}]
+                        result = self.execute_function(tool_call.function.name, tool_call.function.arguments, user_tokens)
+                        output = {
+                            "tool_call_id": tool_call.id,
+                            "output": json.dumps(result),
+                            "tool_name": tool_call.function.name,
+                            "tool_arguments": tool_call.function.arguments
+                        }
+                        tool_outputs.append(output)
+                        if self.event_listener is not None:
+                            self.event_listener(output)
+                    except Exception as e:
+                        print(f"Error executing tool: {e}")
+                        output = {
+                            "tool_call_id": tool_call.id,
+                            "output": json.dumps({"error": str(e)}),
+                            "tool_name": tool_call.function.name,
+                            "tool_arguments": tool_call.function.arguments
+                        }
+                        tool_outputs.append(output)
+                        if self.event_listener is not None:
+                            self.event_listener(output)
+                    
+                data_['messages'] = data_['messages'] + [{"role": "system", "content": "Tool outputs from most recent attempt: " + json.dumps(tool_outputs)}]
                 completion = self.openai_client.chat.completions.create(**data_)
-                delta = completion.choices[0].delta
-                if delta.content is not None:
-                    content = delta.content
-            if content is not None:
-                result += content
-                if content != "" and content is not None:
-                    yield response_chunk.choices[0].delta.content
-            else:
-                print('end of response')
-                yield ""
+
         thread["messages"].append({"role": "assistant", "content": result})
         self.put_thread(self.thread_id, thread["messages"])
         if self.save_memory is not None:
             threading.Thread(target=self.save_memory, args=(self.thread_id, json.dumps({"input": user_message, "output": result}), self.openai_client)).start()
-        return
+        return result
 
     def get_assistant_response(self, message, files=None, image_paths=None, user_tokens=None):
         if self.old_mode:
