@@ -7,6 +7,7 @@ import threading
 import requests
 from bs4 import BeautifulSoup
 from googlesearch import search
+import base64
 
 load_dotenv()
 
@@ -20,7 +21,7 @@ def search_google(query):
 
     for j in search(query, num_results=6, advanced=True):
         search_results.append(j)
-        res_string += j.url + " - " + j.title + " - " + j.description
+        res_string += j.url + " - " + j.title + " - "+j.description
         res_string += "\n\n"
     return "Results from google search: " + query + "\n" + res_string
 
@@ -52,6 +53,10 @@ def scrape_text(url, length):
     text = leftTruncate(text, length)
     return text
 
+def encode_image(image_url):
+    response = requests.get(image_url)
+    print(response.content)
+    return base64.b64encode(response.content).decode('utf-8')
 
 class Assistant:
     def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}):
@@ -227,7 +232,7 @@ class Assistant:
         else:
             return config.generate_tools_representation()
 
-    def handle_old_mode(self, user_message, user_tokens=None):
+    def handle_old_mode(self, user_message, image_paths=None, user_tokens=None):
         if self.thread_id is None:
             self.thread_id = str(uuid.uuid4())
         print('not streaming')
@@ -235,7 +240,19 @@ class Assistant:
         if thread is None:
             thread = {"messages": []}
         print(thread)
-        thread["messages"].append({"role": "user", "content": user_message})
+        
+        content = [{"type": "text", "text": user_message}]
+        if image_paths is not None:
+            for image_path in image_paths:
+                base64_image = encode_image(image_path)
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_path
+                    }
+                })
+        
+        thread["messages"].append({"role": "user", "content": content})
         if len(thread["messages"]) > self.max_messages:
             thread["messages"] = thread["messages"][-self.max_messages:]
         additional_context = ""
@@ -342,7 +359,7 @@ class Assistant:
             threading.Thread(target=self.save_memory, args=(self.thread_id, json.dumps({"input": user_message, "output": response_message}), self.openai_client)).start()
         return response_message
 
-    def handle_old_mode_streaming(self, user_message, user_tokens=None):
+    def handle_old_mode_streaming(self, user_message, image_paths=None, user_tokens=None):
         if self.thread_id is None:
             self.thread_id = str(uuid.uuid4())
         thread = self.get_thread(self.thread_id)
@@ -351,7 +368,19 @@ class Assistant:
         print('got here')
         print(thread)
         print('streaming -------------------')
-        thread["messages"].append({"role": "user", "content": user_message})
+        
+        content = [{"type": "text", "text": user_message}]
+        if image_paths is not None:
+            for image_path in image_paths:
+                base64_image = encode_image(image_path)
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{base64_image}"
+                    }
+                })
+        
+        thread["messages"].append({"role": "user", "content": content})
         if len(thread["messages"]) > self.max_messages:
             thread["messages"] = thread["messages"][-self.max_messages:]
         additional_context = ""
@@ -448,15 +477,34 @@ class Assistant:
             threading.Thread(target=self.save_memory, args=(self.thread_id, json.dumps({"input": user_message, "output": result}), self.openai_client)).start()
         return
 
-    def get_assistant_response(self, message, user_tokens=None):
+    def get_assistant_response(self, message, files=None, image_paths=None, user_tokens=None):
         if self.old_mode:
             if self.streaming:
-                return self.handle_old_mode_streaming(message, user_tokens=user_tokens)
-            return self.handle_old_mode(message, user_tokens=user_tokens)
+                return self.handle_old_mode_streaming(message, image_paths=image_paths, user_tokens=user_tokens)
+            return self.handle_old_mode(message, image_paths=image_paths, user_tokens=user_tokens)
+        
+        attachments = []
+        if files is not None:
+            for file_path in files:
+                file_obj = self.openai_client.create(file=open(file_path, 'rb'), purpose='assistants')
+                attachments.append({"file_id": file_obj.id, "tools": [{"type": "file_search"}, {"type": "code_interpreter"}]})
+        
+        content = [{"type": "text", "text": message}]
+        if image_paths is not None:
+            for image_path in image_paths:
+                #base64_image = encode_image(image_path)
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_path
+                    }
+                })
+        
         message_obj = self.openai_client.beta.threads.messages.create(
             thread_id=self.thread.id,
             role="user",
-            content=message
+            content=content,
+            attachments=attachments if attachments else None
         )
         run = self.openai_client.beta.threads.runs.create(
             thread_id=self.thread.id,
@@ -587,3 +635,4 @@ class Assistant:
                 except Exception as e:
                     print(e)
                     return "Error"
+        return "Error"
