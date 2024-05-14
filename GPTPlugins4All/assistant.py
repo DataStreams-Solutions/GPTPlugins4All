@@ -241,10 +241,11 @@ class Assistant:
             thread = {"messages": []}
         print(thread)
         
-        content = [{"type": "text", "text": user_message}]
+        content = user_message
         if image_paths is not None:
             for image_path in image_paths:
                 base64_image = encode_image(image_path)
+                content = [{"type": "text", "text": user_message}]
                 content.append({
                     "type": "image_url",
                     "image_url": {
@@ -353,6 +354,7 @@ class Assistant:
                 completion = self.openai_client.chat.completions.create(**data_)
 
         response_message = completion.choices[0].message.content
+        print(response_message)
         thread["messages"].append({"role": "assistant", "content": response_message})
         self.put_thread(self.thread_id, thread["messages"])
         if self.save_memory is not None:
@@ -376,7 +378,7 @@ class Assistant:
                 content.append({
                     "type": "image_url",
                     "image_url": {
-                        "url": f"data:image/jpeg;base64,{base64_image}"
+                        "url": image_path
                     }
                 })
         
