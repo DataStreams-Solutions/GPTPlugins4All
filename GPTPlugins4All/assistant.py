@@ -8,6 +8,8 @@ import requests
 from bs4 import BeautifulSoup
 from googlesearch import search
 import base64
+import copy
+from datetime import datetime
 
 load_dotenv()
 
@@ -253,9 +255,8 @@ class Assistant:
                     }
                 })
         
-        thread["messages"].append({"role": "user", "content": content})
-        if len(thread["messages"]) > self.max_messages:
-            thread["messages"] = thread["messages"][-self.max_messages:]
+        thread["messages"].append({"role": "user", "content": content, "timestamp": str(datetime.now().isoformat())})
+        context = copy.deepcopy(thread["messages"][-self.max_messages:])
         additional_context = ""
         if self.query_memory is not None:
             additional_context = self.query_memory(self.thread_id, user_message, self.openai_client)
@@ -317,7 +318,7 @@ class Assistant:
             if len(tools) > 0:
                 data_ = {
                     "model": self.model,
-                    "messages": [{"role": "system", "content": self.instructions + additional_context + desc_string}] + thread["messages"],
+                    "messages": [{"role": "system", "content": self.instructions + additional_context + desc_string}] + context,
                     "max_tokens": self.max_tokens,
                     "tools": tools,
                     "tool_choice": "auto"
@@ -325,13 +326,13 @@ class Assistant:
             else:
                 data_ = {
                     "model": self.model,
-                    "messages": [{"role": "system", "content": self.instructions + additional_context}] + thread["messages"],
+                    "messages": [{"role": "system", "content": self.instructions + additional_context}] + context,
                     "max_tokens": self.max_tokens
                 }
         else:
             data_ = {
                 "model": self.model,
-                "messages": [{"role": "system", "content": self.instructions + additional_context}] + thread["messages"],
+                "messages": [{"role": "system", "content": self.instructions + additional_context}] + context,
                 "max_tokens": self.max_tokens
             }
         completion = self.openai_client.chat.completions.create(**data_)
