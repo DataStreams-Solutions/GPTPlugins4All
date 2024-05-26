@@ -255,7 +255,7 @@ class Assistant:
                     }
                 })
         
-        thread["messages"].append({"role": "user", "content": content, "timestamp": str(datetime.now().isoformat())})
+        thread["messages"].append({"role": "user", "content": content, "timestamp": datetime.now().isoformat()})
         context = copy.deepcopy(thread["messages"][-self.max_messages:])
         additional_context = ""
         if self.query_memory is not None:
@@ -449,7 +449,8 @@ class Assistant:
 
         result = ""
         tool_calls = {}
-        
+        arg_acc =''
+        tool_name = ''
         for response_chunk in completion:
             delta = response_chunk.choices[0].delta
             if delta.content is not None:
@@ -458,10 +459,31 @@ class Assistant:
             
             if delta.tool_calls:
                 tool_outputs = []
+                
                 for tool_call in delta.tool_calls:
                     tool_calls[tool_call.id] = tool_call
+                    print('tool call')
+                    print(tool_call)
+                    arg_acc += tool_call.function.arguments
+                    #check that arguments are complete
+                    if tool_call.function.name != None:
+                        tool_name = tool_call.function.name
+                    print(arg_acc)
+                    if len(arg_acc) > 0 and arg_acc[-1] != '}':
+                        continue
+                    #check that it is a valid json
+                    
                     try:
-                        result = self.execute_function(tool_call.function.name, tool_call.function.arguments, user_tokens)
+                        x = json.loads(arg_acc)
+                    except Exception as e:
+                        continue
+                    try:
+                        print(arg_acc)
+                        result = self.execute_function(tool_name, arg_acc, user_tokens)
+                        arg_acc = ''
+                        tool_name = ''
+                        
+                        print(result)
                         output = {
                             "tool_call_id": tool_call.id,
                             "output": json.dumps(result),
