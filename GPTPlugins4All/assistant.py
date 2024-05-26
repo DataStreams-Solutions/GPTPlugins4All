@@ -444,69 +444,72 @@ class Assistant:
         }
 
         print(data_)
-        completion = self.openai_client.chat.completions.create(**data_)
-        print(completion)
+        done = False
+        while not done:
+            completion = self.openai_client.chat.completions.create(**data_)
+            print(completion)
 
-        result = ""
-        tool_calls = {}
-        arg_acc =''
-        tool_name = ''
-        for response_chunk in completion:
-            delta = response_chunk.choices[0].delta
-            if delta.content is not None:
-                result += delta.content
-                yield delta.content
-            
-            if delta.tool_calls:
-                tool_outputs = []
+            result = ""
+            tool_calls = {}
+            arg_acc =''
+            tool_name = ''
+            for response_chunk in completion:
+                delta = response_chunk.choices[0].delta
+                if delta.content is not None:
+                    done = True
+                    result += delta.content
+                    yield delta.content
                 
-                for tool_call in delta.tool_calls:
-                    tool_calls[tool_call.id] = tool_call
-                    print('tool call')
-                    print(tool_call)
-                    arg_acc += tool_call.function.arguments
-                    #check that arguments are complete
-                    if tool_call.function.name != None:
-                        tool_name = tool_call.function.name
-                    print(arg_acc)
-                    if len(arg_acc) > 0 and arg_acc[-1] != '}':
-                        continue
-                    #check that it is a valid json
+                if delta.tool_calls:
+                    tool_outputs = []
                     
-                    try:
-                        x = json.loads(arg_acc)
-                    except Exception as e:
-                        continue
-                    try:
+                    for tool_call in delta.tool_calls:
+                        tool_calls[tool_call.id] = tool_call
+                        print('tool call')
+                        print(tool_call)
+                        arg_acc += tool_call.function.arguments
+                        #check that arguments are complete
+                        if tool_call.function.name != None:
+                            tool_name = tool_call.function.name
                         print(arg_acc)
-                        result = self.execute_function(tool_name, arg_acc, user_tokens)
-                        arg_acc = ''
-                        tool_name = ''
+                        if len(arg_acc) > 0 and arg_acc[-1] != '}':
+                            continue
+                        #check that it is a valid json
                         
-                        print(result)
-                        output = {
-                            "tool_call_id": tool_call.id,
-                            "output": json.dumps(result),
-                            "tool_name": tool_call.function.name,
-                            "tool_arguments": tool_call.function.arguments
-                        }
-                        tool_outputs.append(output)
-                        if self.event_listener is not None:
-                            self.event_listener(output)
-                    except Exception as e:
-                        print(f"Error executing tool: {e}")
-                        output = {
-                            "tool_call_id": tool_call.id,
-                            "output": json.dumps({"error": str(e)}),
-                            "tool_name": tool_call.function.name,
-                            "tool_arguments": tool_call.function.arguments
-                        }
-                        tool_outputs.append(output)
-                        if self.event_listener is not None:
-                            self.event_listener(output)
-                    
-                data_['messages'] = data_['messages'] + [{"role": "system", "content": "Tool outputs from most recent attempt: " + json.dumps(tool_outputs)}]
-                completion = self.openai_client.chat.completions.create(**data_)
+                        try:
+                            x = json.loads(arg_acc)
+                        except Exception as e:
+                            continue
+                        try:
+                            print(arg_acc)
+                            result = self.execute_function(tool_name, arg_acc, user_tokens)
+                            arg_acc = ''
+                            tool_name = ''
+                            
+                            print(result)
+                            output = {
+                                "tool_call_id": tool_call.id,
+                                "output": json.dumps(result),
+                                "tool_name": tool_call.function.name,
+                                "tool_arguments": tool_call.function.arguments
+                            }
+                            tool_outputs.append(output)
+                            if self.event_listener is not None:
+                                self.event_listener(output)
+                        except Exception as e:
+                            print(f"Error executing tool: {e}")
+                            output = {
+                                "tool_call_id": tool_call.id,
+                                "output": json.dumps({"error": str(e)}),
+                                "tool_name": tool_call.function.name,
+                                "tool_arguments": tool_call.function.arguments
+                            }
+                            tool_outputs.append(output)
+                            if self.event_listener is not None:
+                                self.event_listener(output)
+                        
+                    data_['messages'] = data_['messages'] + [{"role": "system", "content": "Tool outputs from most recent attempt: " + json.dumps(tool_outputs)}]
+                #completion = self.openai_client.chat.completions.create(**data_)
 
         thread["messages"].append({"role": "assistant", "content": result})
         self.put_thread(self.thread_id, thread["messages"])
