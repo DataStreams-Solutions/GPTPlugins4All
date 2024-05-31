@@ -522,12 +522,15 @@ class Assistant:
         if self.save_memory is not None:
             threading.Thread(target=self.save_memory, args=(self.thread_id, json.dumps({"input": user_message, "output": result}), self.openai_client)).start()
         return result
+    def delete_message_assistant(self, message_id):
+        self.openai_client.beta.threads.messages.delete(thread_id=self.thread.id, message_id=message_id)
+        return "Message deleted"
 
-    def get_assistant_response(self, message, files=None, image_paths=None, user_tokens=None):
+    def get_assistant_response(self, message, files=None, image_paths=None, user_tokens=None, message_id=None, store_mid=None):
         if self.old_mode:
             if self.streaming:
                 return self.handle_old_mode_streaming(message, image_paths=image_paths, user_tokens=user_tokens)
-            return self.handle_old_mode(message, image_paths=image_paths, user_tokens=user_tokens)
+            return self.handle_old_mode(message, image_paths=image_paths, user_tokens=user_tokens, message_id=message_id)
         
         attachments = []
         if files is not None:
@@ -552,6 +555,9 @@ class Assistant:
             content=content,
             attachments=attachments if attachments else None
         )
+        if store_mid is not None:
+            store_mid(message_obj.id, message_id, self.thread.id)
+
         run = self.openai_client.beta.threads.runs.create(
             thread_id=self.thread.id,
             assistant_id=self.assistant.id,

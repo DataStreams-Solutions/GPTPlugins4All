@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='GPTPlugins4All',
-    version='1.0.38',
+    version='1.0.41',
     packages=find_packages(),
     description='GPT Plugins for 4all',
     long_description=open('README.md').read(),
