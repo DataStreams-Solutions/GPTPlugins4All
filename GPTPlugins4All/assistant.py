@@ -234,7 +234,7 @@ class Assistant:
         else:
             return config.generate_tools_representation()
 
-    def handle_old_mode(self, user_message, image_paths=None, user_tokens=None):
+    def handle_old_mode(self, user_message, image_paths=None, user_tokens=None, message_id=None):
         if self.thread_id is None:
             self.thread_id = str(uuid.uuid4())
         print('not streaming')
@@ -244,9 +244,10 @@ class Assistant:
         print(thread)
         
         content = user_message
-        if image_paths is not None:
+        if image_paths is not None and image_paths != []:
             for image_path in image_paths:
                 #base64_image = encode_image(image_path)
+                print(image_path)
                 content = [{"type": "text", "text": user_message}]
                 content.append({
                     "type": "image_url",
@@ -254,9 +255,14 @@ class Assistant:
                         "url": image_path
                     }
                 })
-        
-        thread["messages"].append({"role": "user", "content": content, "timestamp": datetime.now().isoformat()})
+        msg = {"role": "user", "content": content, "timestamp": datetime.now().isoformat()}
+        if message_id is not None:
+            msg["message_id"] = message_id
+        thread["messages"].append(msg)
         context = copy.deepcopy(thread["messages"][-self.max_messages:])
+        
+        #print(context)
+        #print(self.thread_id)
         additional_context = ""
         if self.query_memory is not None:
             additional_context = self.query_memory(self.thread_id, user_message, self.openai_client)
