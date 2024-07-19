@@ -61,7 +61,7 @@ def encode_image(image_url):
     return base64.b64encode(response.content).decode('utf-8')
 
 class Assistant:
-    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}):
+    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None):
         try:
             from openai import OpenAI
         except ImportError:
@@ -80,12 +80,14 @@ class Assistant:
         self.model = model
         self.event_listener = event_listener
         self.assistant_id = assistant_id
+        self.embedding_model = embedding_model
         self.thread_id = thread_id
         self.old_mode = old_mode
         self.streaming = streaming
         self.has_file = has_file
         self.file_identifier = file_identifier
         self.read_file = read_file
+        self.embedding_client = None
         self.search_enabled = search_enabled
         self.view_pages = view_pages
         self.search_window = search_window
@@ -94,20 +96,29 @@ class Assistant:
         if is_json is not None:
             self.is_json = is_json
         if openai_key is None:
-            self.openai_client = OpenAI()
+            if base_url is None or base_url == '' or base_url == 'https://api.openai.com':
+                self.openai_client = OpenAI()
+            else:
+                self.openai_client = OpenAI(base_url=base_url)
+                self.embedding_client = OpenAI(api_key=embedding_key)
         else:
-            self.openai_client = OpenAI(api_key=openai_key)
+            if base_url is None or base_url == '' or base_url == 'https://api.openai.com':
+                self.openai_client = OpenAI(api_key=openai_key)
+            else:
+                self.openai_client = OpenAI(api_key=openai_key, base_url=base_url)
+                self.embedding_client = OpenAI(api_key=embedding_key)
         if old_mode:
             self.assistant = None
             self.thread = None
             self.old_mode = True
             self.raw_mode = raw_mode
-            if get_thread is None:
-                raise ValueError("get_thread must be provided if old_mode is True")
-            if put_thread is None:
-                raise ValueError("put_thread must be provided if old_mode is True")
-            if max_tokens is None:
-                raise ValueError("max_tokens must be provided if old_mode is True")
+            if base_url is None or base_url == '' or base_url == 'https://api.openai.com':
+                if get_thread is None:
+                    raise ValueError("get_thread must be provided if old_mode is True")
+                if put_thread is None:
+                    raise ValueError("put_thread must be provided if old_mode is True")
+                if max_tokens is None:
+                    raise ValueError("max_tokens must be provided if old_mode is True")
             self.save_memory = save_memory
             self.query_memory = query_memory
             self.max_messages = max_messages
@@ -265,7 +276,10 @@ class Assistant:
         #print(self.thread_id)
         additional_context = ""
         if self.query_memory is not None:
-            additional_context = self.query_memory(self.thread_id, user_message, self.openai_client)
+            if self.embedding_client is not None:
+                additional_context = self.query_memory(self.thread_id, user_message, self.embedding_client, model=self.embedding_model)
+            else:
+                additional_context = self.query_memory(self.thread_id, user_message, self.openai_client,model=self.embedding_model)
         if additional_context is not None:
             additional_context = "\nInformation from the past that may be relevant: " + additional_context
         if self.has_file:
@@ -365,7 +379,20 @@ class Assistant:
         thread["messages"].append({"role": "assistant", "content": response_message})
         self.put_thread(self.thread_id, thread["messages"])
         if self.save_memory is not None:
-            threading.Thread(target=self.save_memory, args=(self.thread_id, json.dumps({"input": user_message, "output": response_message}), self.openai_client)).start()
+            if self.embedding_model is None:
+                if self.embedding_client is not None:
+                    threading.Thread(target=self.save_memory, args=(self.thread_id, json.dumps({"input": user_message, "output": response_message}), self.embedding_client)).start()
+                else:
+                    threading.Thread(target=self.save_memory, args=(self.thread_id, json.dumps({"input": user_message, "output": response_message}), self.openai_client)).start()
+            else:
+                if self.embedding_client is not None:
+                    threading.Thread(target=self.save_memory, 
+                     args=(self.thread_id, json.dumps({"input": user_message, "output": response_message}), self.embedding_client), 
+                     kwargs={'model': self.embedding_model}).start()
+                else:
+                    threading.Thread(target=self.save_memory, 
+                    args=(self.thread_id, json.dumps({"input": user_message, "output": response_message}), self.openai_client), 
+                    kwargs={'model': self.embedding_model}).start()
         return response_message
 
     def handle_old_mode_streaming(self, user_message, image_paths=None, user_tokens=None):
@@ -375,7 +402,7 @@ class Assistant:
         if thread is None:
             thread = {"messages": []}
         print('got here')
-        print(thread)
+        #print(thread)
         print('streaming -------------------')
         
         content = [{"type": "text", "text": user_message}]
@@ -393,7 +420,10 @@ class Assistant:
             thread["messages"] = thread["messages"][-self.max_messages:]
         additional_context = ""
         if self.query_memory is not None:
-            additional_context = self.query_memory(self.thread_id, user_message, self.openai_client)
+            if self.embedding_client is not None:
+                additional_context = self.query_memory(self.thread_id, user_message, self.embedding_client,model=self.embedding_model)
+            else:
+                additional_context = self.query_memory(self.thread_id, user_message, self.openai_client,model=self.embedding_model)
         if additional_context is not None:
             additional_context = "\nInformation from the past that may be relevant: " + additional_context
         if self.has_file:
@@ -439,21 +469,22 @@ class Assistant:
         if self.other_tools is not None:
             for tool in self.other_tools:
                 tools.append(tool)
-        
+        if len(tools) == 0:
+            tools = None
         data_ = {
             "model": self.model,
             "messages": [{"role": "system", "content": self.instructions + additional_context}] + thread["messages"],
             "max_tokens": self.max_tokens,
             "stream": True,
             "tools": tools,
-            "tool_choice": "auto" if len(tools) > 0 else None
+            "tool_choice": "auto" if tools is not None and len(tools) > 0 else None
         }
 
-        print(data_)
+        #print(data_)
         done = False
         while not done:
             completion = self.openai_client.chat.completions.create(**data_)
-            print(completion)
+            #print(completion)
 
             result = ""
             tool_calls = {}
@@ -518,9 +549,23 @@ class Assistant:
                 #completion = self.openai_client.chat.completions.create(**data_)
 
         thread["messages"].append({"role": "assistant", "content": result})
-        self.put_thread(self.thread_id, thread["messages"])
+        #self.put_thread(self.thread_id, thread["messages"])
+        threading.Thread(target=self.put_thread, args=(self.thread_id, thread["messages"])).start()
         if self.save_memory is not None:
-            threading.Thread(target=self.save_memory, args=(self.thread_id, json.dumps({"input": user_message, "output": result}), self.openai_client)).start()
+            if self.embedding_model is None:
+                if self.embedding_client is not None:
+                    threading.Thread(target=self.save_memory, args=(self.thread_id, json.dumps({"input": user_message, "output": result}), self.embedding_client)).start()
+                else:
+                    threading.Thread(target=self.save_memory, args=(self.thread_id, json.dumps({"input": user_message, "output": result}), self.openai_client)).start()
+            else:
+                if self.embedding_client is not None:
+                    threading.Thread(target=self.save_memory, 
+                    args=(self.thread_id, json.dumps({"input": user_message, "output": result}), self.openai_client), 
+                    kwargs={'model': self.embedding_model}).start()
+                else:
+                    threading.Thread(target=self.save_memory, 
+                    args=(self.thread_id, json.dumps({"input": user_message, "output": result}), self.openai_client), 
+                    kwargs={'model': self.embedding_model}).start()
         return result
     def delete_message_assistant(self, message_id):
         self.openai_client.beta.threads.messages.delete(thread_id=self.thread.id, message_id=message_id)
