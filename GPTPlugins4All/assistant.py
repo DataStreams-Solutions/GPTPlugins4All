@@ -112,13 +112,13 @@ class Assistant:
             self.thread = None
             self.old_mode = True
             self.raw_mode = raw_mode
-            if base_url is None or base_url == '' or base_url == 'https://api.openai.com':
-                if get_thread is None:
-                    raise ValueError("get_thread must be provided if old_mode is True")
-                if put_thread is None:
-                    raise ValueError("put_thread must be provided if old_mode is True")
-                if max_tokens is None:
-                    raise ValueError("max_tokens must be provided if old_mode is True")
+            #if base_url is None or base_url == '' or base_url == 'https://api.openai.com':
+            #    if get_thread is None:
+            #        raise ValueError("get_thread must be provided if old_mode is True")
+            #    if put_thread is None:
+            #        raise ValueError("put_thread must be provided if old_mode is True")
+            #    if max_tokens is None:
+            #        raise ValueError("max_tokens must be provided if old_mode is True")
             self.save_memory = save_memory
             self.query_memory = query_memory
             self.max_messages = max_messages
@@ -504,10 +504,16 @@ class Assistant:
                         tool_calls[tool_call.id] = tool_call
                         print('tool call')
                         print(tool_call)
+                        
                         arg_acc += tool_call.function.arguments
                         #check that arguments are complete
                         if tool_call.function.name != None:
                             tool_name = tool_call.function.name
+                            #if self.event_listener is not None:
+                            #    self.event_listener("Hang on, gotta look up some stuff")
+                            #    sys_message = "Hang on, gotta "+ tool_name
+                            #    yield sys_message
+                            #    print('telling system to hang on')
                         print(arg_acc)
                         if len(arg_acc) > 0 and arg_acc[-1] != '}':
                             continue
@@ -517,8 +523,17 @@ class Assistant:
                             x = json.loads(arg_acc)
                         except Exception as e:
                             continue
+                        #replace underscore with space
+                        tool_name_for_mess = tool_name.replace('_', ' ')
+                        if tool_name == 'view_page':
+                            tool_name_for_mess = 'view a page'
+                        if tool_name == 'transfer':
+                            tool_name_for_mess = 'transfer your call'
+                        sys_message = "Hang on, gotta "+ tool_name_for_mess
+                        yield sys_message
                         try:
                             print(arg_acc)
+                            
                             result = self.execute_function(tool_name, arg_acc, user_tokens)
                             arg_acc = ''
                             tool_name = ''
