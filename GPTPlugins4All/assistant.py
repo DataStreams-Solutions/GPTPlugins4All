@@ -61,7 +61,7 @@ def encode_image(image_url):
     return base64.b64encode(response.content).decode('utf-8')
 
 class Assistant:
-    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None):
+    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None, suggest_responses=False):
         try:
             from openai import OpenAI
         except ImportError:
@@ -93,6 +93,10 @@ class Assistant:
         self.search_window = search_window
         self.other_tools = other_tools
         self.other_functions = other_functions
+        self.suggest_responses = suggest_responses
+        if self.suggest_responses:
+            self.instructions += "\nAlso give the user potential replies (eg quick-replies) to follow up with in this format: \n[\"response1\", \"response2\", \"response3\"]"
+            print('suggestions enabled')
         if is_json is not None:
             self.is_json = is_json
         if openai_key is None:
@@ -499,7 +503,7 @@ class Assistant:
                 
                 if delta.tool_calls:
                     tool_outputs = []
-                    
+                    #yield "Hang on, gotta do some stuff"
                     for tool_call in delta.tool_calls:
                         tool_calls[tool_call.id] = tool_call
                         print('tool call')
