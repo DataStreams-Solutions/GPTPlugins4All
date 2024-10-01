@@ -418,8 +418,8 @@ class Assistant:
                         "url": image_path
                     }
                 })
-        
-        thread["messages"].append({"role": "user", "content": content})
+        timestamp = datetime.now().isoformat()
+        thread["messages"].append({"role": "user", "content": content, "timestamp": timestamp})
         if len(thread["messages"]) > self.max_messages:
             thread["messages"] = thread["messages"][-self.max_messages:]
         additional_context = ""
