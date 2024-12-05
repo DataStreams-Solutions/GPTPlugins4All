@@ -59,9 +59,114 @@ def encode_image(image_url):
     response = requests.get(image_url)
     #print(response.content)
     return base64.b64encode(response.content).decode('utf-8')
+def generate_tools_from_api_calls(api_calls):
+    import functools
+    other_tools = []
+    other_functions = {}
+
+    for api_call in api_calls:
+        # Use user-provided name or generate one
+        function_name = api_call.get('name') or generate_function_name(api_call)
+        # Use user-provided description or generate one
+        function_description = api_call.get('description') or f"Call API endpoint {api_call['url']} with method {api_call['method']}"
+
+        # Check for duplicate function names
+        if function_name in other_functions:
+            raise ValueError(f"Duplicate function name detected: {function_name}")
+
+        # Define the parameters schema
+        parameters_schema = {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+        for param in api_call.get('params', []):
+            parameters_schema["properties"][param] = {"type": "string"}
+            parameters_schema["required"].append(param)
+
+        # Create the tool definition
+        tool = {
+            "type": "function",
+            "function": {
+                "name": function_name,
+                "description": function_description,
+                "parameters": parameters_schema
+            }
+        }
+        other_tools.append(tool)
+
+        # Define the function that executes the API call
+        def create_api_function(api_call):
+            def api_function(arguments):
+                import requests
+                method = api_call['method']
+                url = api_call['url']
+                is_json = api_call.get('json', False)
+                headers = api_call.get('headers', {}).copy()
+
+                # Handle API key
+                auth = api_call.get('auth', {})
+                if auth:
+                    api_key = auth.get('api_key', '')
+                    placement = auth.get('placement', 'header')
+                    if placement == 'header':
+                        header_name = auth.get('header_name', 'Authorization')
+                        format_str = auth.get('format', '{api_key}')
+                        headers[header_name] = format_str.format(api_key=api_key)
+                    elif placement == 'query':
+                        param_name = auth.get('param_name', 'api_key')
+                        arguments[param_name] = api_key
+                    elif placement == 'body':
+                        param_name = auth.get('param_name', 'api_key')
+                        arguments[param_name] = api_key
+                    else:
+                        return f"Unsupported API key placement: {placement}"
+
+                try:
+                    if method.upper() == 'GET':
+                        response = requests.get(url, params=arguments, headers=headers)
+                    elif method.upper() == 'POST':
+                        if is_json:
+                            response = requests.post(url, json=arguments, headers=headers)
+                        else:
+                            response = requests.post(url, data=arguments, headers=headers)
+                    elif method.upper() == 'PUT':
+                        if is_json:
+                            response = requests.put(url, json=arguments, headers=headers)
+                        else:
+                            response = requests.put(url, data=arguments, headers=headers)
+                    elif method.upper() == 'DELETE':
+                        response = requests.delete(url, params=arguments, headers=headers)
+                    else:
+                        return f"Unsupported HTTP method: {method}"
+
+                    # Check for HTTP errors
+                    response.raise_for_status()
+
+                    # Return response text or json
+                    try:
+                        return response.json()
+                    except ValueError:
+                        return response.text
+                except requests.exceptions.RequestException as e:
+                    return f"An error occurred during the API call: {str(e)}"
+            return api_function
+
+        # Add the function to other_functions
+        other_functions[function_name] = create_api_function(api_call)
+
+    return other_tools, other_functions
+
+def generate_function_name(api_call):
+    from urllib.parse import urlparse
+    parsed_url = urlparse(api_call['url'])
+    path = parsed_url.path.strip('/').replace('/', '_').replace('-', '_').replace('.', '_')
+    method = api_call['method'].lower()
+    function_name = f"{method}_{path}"
+    return function_name
 
 class Assistant:
-    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None, suggest_responses=False):
+    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None, suggest_responses=False, api_calls=[], sources=None):
         try:
             from openai import OpenAI
         except ImportError:
@@ -91,8 +196,14 @@ class Assistant:
         self.search_enabled = search_enabled
         self.view_pages = view_pages
         self.search_window = search_window
-        self.other_tools = other_tools
-        self.other_functions = other_functions
+        self.other_tools = other_tools or []
+        self.other_functions = other_functions or {}
+
+        # Generate tools and functions from api_calls
+        more_tools, more_functions = generate_tools_from_api_calls(api_calls)
+        self.other_tools += more_tools
+        self.other_functions.update(more_functions)
+
         self.suggest_responses = suggest_responses
         if self.suggest_responses:
             self.instructions += "\nAlso give the user potential replies (eg quick-replies) to follow up with in this format: \n[\"response1\", \"response2\", \"response3\"]"
