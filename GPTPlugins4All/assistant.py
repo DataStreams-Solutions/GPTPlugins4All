@@ -20,12 +20,16 @@ encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
 def search_google(query):
     search_results = []
     res_string = ""
-
-    for j in search(query, num_results=6, advanced=True):
-        search_results.append(j)
-        res_string += j.url + " - " + j.title + " - "+j.description
-        res_string += "\n\n"
-    return "Results from google search: " + query + "\n" + res_string
+    print("Searching google for: " + query)
+    try:
+        for j in search(query, num_results=6, advanced=True,lang="en",
+            region="US"):
+            search_results.append(j)
+            res_string += j.url + " - " + j.title + " - "+j.description
+            res_string += "\n\n"
+        return "Results from google search: " + query + "\n" + res_string
+    except Exception as e:
+        return "Error: " + str(e)
 
 def leftTruncate(text, length):
     encoded = encoding.encode(text)

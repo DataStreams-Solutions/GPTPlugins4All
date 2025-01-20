@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='GPTPlugins4All',
-    version='1.0.59',
+    version='1.0.60',
     packages=find_packages(),
     description='GPT Plugins for 4all',
     long_description=open('README.md').read(),
@@ -15,7 +15,7 @@ setup(
         "Source Code": "https://github.com/DataStreams-Solutions/GPTPlugins4All",
     },
     install_requires=[
-        'PyYAML', 'requests', 'openapi-spec-validator', 'bs4', 'googlesearch-python>=1.2.3', 'tiktoken'
+        'PyYAML', 'requests', 'openapi-spec-validator', 'bs4', 'googlesearch-python @ git+https://github.com/stanfrbd/googlesearch@lynx-user-agent', 'tiktoken'
     ],
     extras_require={
         'openai':  ["openai"]
