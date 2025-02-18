@@ -17,6 +17,8 @@ from typing import Optional
 import tiktoken
 encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
 
+
+cost_dict = {'o3-mini': 110/1000000, 'gpt-3.5-turbo': 1/1000000, 'o1': 60000/1000000, 'gpt-4o': 1000/1000000, 'gpt-4o-mini': 60/1000000}
 def search_google(query):
     search_results = []
     res_string = ""
