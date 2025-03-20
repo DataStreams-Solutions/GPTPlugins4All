@@ -14,7 +14,7 @@ GPT Plugins 4All is a Python library designed to facilitate the integration of G
 - Command-Line Interface (CLI) for convenient management of configurations and interactions.
 - Turn specs into function calls for AI
 - Import specs by name from repo of over 200 plugins
-- Easily create AI Assistants that have these functions (and search, view page, and RAG, and others) using any openai-compatible api
+- Easily create AI Assistants that have these functions (and search, view page, and RAG, and others) using any openai-compatible api (eg OpenRouter, novita, Deepseek)
 - AI assistant streaming for real-time applications like phone calls
 - Handles images, sends events
 ## Installation
