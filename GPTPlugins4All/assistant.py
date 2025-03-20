@@ -19,12 +19,12 @@ encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
 
 
 cost_dict = {'o3-mini': 110/1000000, 'gpt-3.5-turbo': 1/1000000, 'o1': 60000/1000000, 'gpt-4o': 1000/1000000, 'gpt-4o-mini': 60/1000000}
-def search_google(query):
+def search_google(query, num_results=6):
     search_results = []
     res_string = ""
     print("Searching google for: " + query)
     try:
-        for j in search(query, num_results=6, advanced=True,lang="en",
+        for j in search(query, num_results=num_results, advanced=True,lang="en",
             region="US"):
             search_results.append(j)
             res_string += j.url + " - " + j.title + " - "+j.description
