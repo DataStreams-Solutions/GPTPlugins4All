@@ -42,6 +42,7 @@ def leftTruncate(text, length):
         return text
 
 def scrape_text(url, length):
+    import re
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 6.2; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36'}
     response = requests.get(url, verify=False, headers=headers)
     if not isinstance(length, int):
@@ -51,8 +52,12 @@ def scrape_text(url, length):
 
     # Check if we need to fall back to headless browser
     response_text = response.text
-    if len(response_text.strip()) < 100:
-        print(f"Falling back to headless browser for {url}")
+    # More comprehensive check: small content OR no links (indicating JS-heavy page)
+    has_links = bool(re.search(r'<a\s+(?:[^>]*?\s+)?href="([^"]*)"', response_text))
+    content_too_small = len(response_text.strip()) < 100
+    
+    if content_too_small or not has_links:
+        print(f"Falling back to headless browser for {url} (content_small: {content_too_small}, has_links: {has_links})")
         try:
             from playwright.sync_api import sync_playwright
             with sync_playwright() as p:
@@ -62,6 +67,7 @@ def scrape_text(url, length):
                 page.wait_for_selector("body", timeout=30000)
                 response_text = page.content()
                 browser.close()
+                print(f"Successfully rendered page with headless browser, content length: {len(response_text)}")
         except Exception as e:
             print(f"Error during fallback rendering: {e}")
             # Continue with original response if fallback fails
