@@ -249,7 +249,12 @@ class Assistant:
             self.max_messages = max_messages
             self.get_thread = get_thread
             self.put_thread = put_thread
-            self.max_tokens = max_tokens
+            self.max_tokens = None
+            self.max_completion_tokens = None
+            if 'gpt-5' in model.lower():
+                self.max_completion_tokens = max_tokens
+            else:
+                self.max_tokens = max_tokens
             pass
         else:
             self.assistant, self.thread = self.create_assistant_and_thread(files=files, code_interpreter=code_interpreter, retrieval=retrieval, bot_intro=bot_intro)
@@ -260,6 +265,17 @@ class Assistant:
             purpose='assistants'
         )
         self.openai_client.beta.assistants.update(self.assistant_id, tool_resources={"code_interpreter": {"file_ids": [file.id]}})
+    
+    def _build_chat_data(self, base_data):
+        """Helper method to build chat completion data with correct token parameter"""
+        data = base_data.copy()
+        if 'gpt-5' in self.model.lower():
+            if self.max_completion_tokens is not None:
+                data["max_completion_tokens"] = self.max_completion_tokens
+        else:
+            if self.max_tokens is not None:
+                data["max_tokens"] = self.max_tokens
+        return data
     
     def create_assistant_and_thread(self, files=None, code_interpreter=False, retrieval=False, bot_intro=None):
         tools = []
@@ -461,25 +477,25 @@ class Assistant:
                     valid_descriptions.append(config.model_description)
             desc_string = ""
             if len(tools) > 0:
-                data_ = {
+                base_data = {
                     "model": self.model,
                     "messages": [{"role": "system", "content": self.instructions + additional_context + desc_string}] + context,
-                    "max_tokens": self.max_tokens,
                     "tools": tools,
                     "tool_choice": "auto"
                 }
+                data_ = self._build_chat_data(base_data)
             else:
-                data_ = {
+                base_data = {
                     "model": self.model,
-                    "messages": [{"role": "system", "content": self.instructions + additional_context}] + context,
-                    "max_tokens": self.max_tokens
+                    "messages": [{"role": "system", "content": self.instructions + additional_context}] + context
                 }
+                data_ = self._build_chat_data(base_data)
         else:
-            data_ = {
+            base_data = {
                 "model": self.model,
-                "messages": [{"role": "system", "content": self.instructions + additional_context}] + context,
-                "max_tokens": self.max_tokens
+                "messages": [{"role": "system", "content": self.instructions + additional_context}] + context
             }
+            data_ = self._build_chat_data(base_data)
         try:
             completion = self.openai_client.chat.completions.create(**data_)
             print(self.configs)
@@ -498,6 +514,8 @@ class Assistant:
                         if self.event_listener is not None:
                             self.event_listener(output)
                     data_['messages'] = data_['messages'] + [{"role": "system", "content": "Tool outputs from most recent attempt" + json.dumps(tool_outputs) + "\n If the above indicates an error, change the input and try again"}]
+                    thread["messages"].append({"role": "system", "content": "Tool outputs from most recent attempt: " + json.dumps(tool_outputs)})
+
                     completion = self.openai_client.chat.completions.create(**data_)
 
             response_message = completion.choices[0].message.content
@@ -600,14 +618,14 @@ class Assistant:
                 tools.append(tool)
         if len(tools) == 0:
             tools = None
-        data_ = {
+        base_data = {
             "model": self.model,
             "messages": [{"role": "system", "content": self.instructions + additional_context}] + thread["messages"],
-            "max_tokens": self.max_tokens,
             "stream": True,
             "tools": tools,
             "tool_choice": "auto" if tools is not None and len(tools) > 0 else None
         }
+        data_ = self._build_chat_data(base_data)
 
         #print(data_)
         done = False
