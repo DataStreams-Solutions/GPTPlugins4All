@@ -41,6 +41,50 @@ def leftTruncate(text, length):
     else:
         return text
 
+def _playwright_scrape_subprocess(url):
+    """Run Playwright in a subprocess to avoid conflicts with main application"""
+    import subprocess
+    import sys
+    import json
+    
+    # Create a small Python script to run Playwright
+    script = f'''
+import sys
+import json
+try:
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto("{url}", timeout=60000)
+        page.wait_for_selector("body", timeout=30000)
+        content = page.content()
+        browser.close()
+        print(json.dumps({{"success": True, "content": content}}))
+except Exception as e:
+    print(json.dumps({{"success": False, "error": str(e)}}))
+'''
+    
+    try:
+        result = subprocess.run([sys.executable, '-c', script], 
+                              capture_output=True, text=True, timeout=120)
+        if result.returncode == 0:
+            data = json.loads(result.stdout.strip())
+            if data.get("success"):
+                return data.get("content", "")
+            else:
+                print(f"Playwright subprocess error: {data.get('error')}")
+                return None
+        else:
+            print(f"Subprocess failed with return code {result.returncode}: {result.stderr}")
+            return None
+    except subprocess.TimeoutExpired:
+        print("Playwright subprocess timed out")
+        return None
+    except Exception as e:
+        print(f"Error running Playwright subprocess: {e}")
+        return None
+
 def scrape_text(url, length):
     import re
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 6.2; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36'}
@@ -58,19 +102,12 @@ def scrape_text(url, length):
     
     if content_too_small or not has_links:
         print(f"Falling back to headless browser for {url} (content_small: {content_too_small}, has_links: {has_links})")
-        try:
-            from playwright.sync_api import sync_playwright
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
-                page.goto(url, timeout=60000)
-                page.wait_for_selector("body", timeout=30000)
-                response_text = page.content()
-                browser.close()
-                print(f"Successfully rendered page with headless browser, content length: {len(response_text)}")
-        except Exception as e:
-            print(f"Error during fallback rendering: {e}")
-            # Continue with original response if fallback fails
+        playwright_content = _playwright_scrape_subprocess(url)
+        if playwright_content:
+            response_text = playwright_content
+            print(f"Successfully rendered page with headless browser, content length: {len(response_text)}")
+        else:
+            print("Playwright fallback failed, using original response")
 
     soup = BeautifulSoup(response_text, "html.parser")
 
