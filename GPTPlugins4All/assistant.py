@@ -49,7 +49,24 @@ def scrape_text(url, length):
     if response.status_code >= 400:
         return "Error: HTTP " + str(response.status_code) + " error"
 
-    soup = BeautifulSoup(response.text, "html.parser")
+    # Check if we need to fall back to headless browser
+    response_text = response.text
+    if len(response_text.strip()) < 100:
+        print(f"Falling back to headless browser for {url}")
+        try:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page()
+                page.goto(url, timeout=60000)
+                page.wait_for_selector("body", timeout=30000)
+                response_text = page.content()
+                browser.close()
+        except Exception as e:
+            print(f"Error during fallback rendering: {e}")
+            # Continue with original response if fallback fails
+
+    soup = BeautifulSoup(response_text, "html.parser")
 
     for script in soup(["script", "style"]):
         script.extract()
