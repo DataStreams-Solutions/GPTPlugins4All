@@ -232,7 +232,7 @@ def generate_function_name(api_call):
     return function_name
 
 class Assistant:
-    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None, suggest_responses=False, api_calls=[], sources=None, initial_suggestions=None):
+    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None, suggest_responses=False, api_calls=[], sources=None, initial_suggestions=None, mcp_servers=None):
         try:
             from openai import OpenAI
         except ImportError:
@@ -318,6 +318,14 @@ class Assistant:
             pass
         else:
             self.assistant, self.thread = self.create_assistant_and_thread(files=files, code_interpreter=code_interpreter, retrieval=retrieval, bot_intro=bot_intro)
+        
+        # Initialize MCP clients
+        self.mcp_servers = mcp_servers or {}
+        self.mcp_sessions = {}
+        self.mcp_tools = []
+        self.mcp_functions = {}
+        if self.mcp_servers:
+            self._initialize_mcp_clients()
 
     def add_file(self, file):
         file = self.openai_client.create(
@@ -336,6 +344,164 @@ class Assistant:
             if self.max_tokens is not None:
                 data["max_tokens"] = self.max_tokens
         return data
+    
+    def _initialize_mcp_clients(self):
+        """Initialize MCP client connections"""
+        import asyncio
+        import threading
+        
+        def run_mcp_setup():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(self._setup_mcp_connections())
+            except Exception as e:
+                print(f"Error initializing MCP clients: {e}")
+        
+        # Run MCP setup in a separate thread to avoid blocking
+        mcp_thread = threading.Thread(target=run_mcp_setup, daemon=True)
+        mcp_thread.start()
+        mcp_thread.join(timeout=10)  # Wait up to 10 seconds for MCP setup
+    
+    async def _setup_mcp_connections(self):
+        """Set up connections to MCP servers"""
+        try:
+            from mcp import ClientSession, StdioServerParameters
+            from mcp.client.stdio import stdio_client
+            import os
+            
+            for server_name, server_config in self.mcp_servers.items():
+                try:
+                    # Create server parameters
+                    server_params = StdioServerParameters(
+                        command=server_config.get('command', 'npx'),
+                        args=server_config.get('args', []),
+                        env=server_config.get('env', {})
+                    )
+                    
+                    # Store connection info for later use
+                    self.mcp_sessions[server_name] = {
+                        'params': server_params,
+                        'tools': [],
+                        'connected': False
+                    }
+                    
+                    # Try to connect and get available tools
+                    await self._connect_and_get_tools(server_name, server_params)
+                    
+                except Exception as e:
+                    print(f"Failed to initialize MCP server {server_name}: {e}")
+                    
+        except ImportError:
+            print("MCP library not available. Install with: pip install mcp")
+    
+    async def _connect_and_get_tools(self, server_name, server_params):
+        """Connect to an MCP server and get its tools"""
+        try:
+            from mcp import ClientSession
+            from mcp.client.stdio import stdio_client
+            
+            async with stdio_client(server_params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    
+                    # Get available tools
+                    tools_response = await session.list_tools()
+                    
+                    for tool in tools_response.tools:
+                        # Convert MCP tool to OpenAI function format
+                        function_def = {
+                            "type": "function",
+                            "function": {
+                                "name": f"mcp_{server_name}_{tool.name}",
+                                "description": tool.description or f"Tool {tool.name} from {server_name}",
+                                "parameters": tool.inputSchema or {
+                                    "type": "object",
+                                    "properties": {},
+                                    "required": []
+                                }
+                            }
+                        }
+                        
+                        self.mcp_tools.append(function_def)
+                        self.other_tools.append(function_def)
+                        
+                        # Create function wrapper
+                        self.mcp_functions[f"mcp_{server_name}_{tool.name}"] = self._create_mcp_tool_wrapper(server_name, tool.name)
+                        self.other_functions[f"mcp_{server_name}_{tool.name}"] = self.mcp_functions[f"mcp_{server_name}_{tool.name}"]
+                    
+                    self.mcp_sessions[server_name]['tools'] = [tool.name for tool in tools_response.tools]
+                    self.mcp_sessions[server_name]['connected'] = True
+                    print(f"Connected to MCP server {server_name} with {len(tools_response.tools)} tools")
+                    
+        except Exception as e:
+            print(f"Error connecting to MCP server {server_name}: {e}")
+    
+    def _create_mcp_tool_wrapper(self, server_name, tool_name):
+        """Create a wrapper function for an MCP tool"""
+        def mcp_tool_wrapper(arguments):
+            import asyncio
+            import json
+            
+            try:
+                # Parse arguments if they're a string
+                if isinstance(arguments, str):
+                    arguments = json.loads(arguments)
+                
+                # Run the MCP tool call in a new event loop
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    result = loop.run_until_complete(self._call_mcp_tool(server_name, tool_name, arguments))
+                    return result
+                finally:
+                    loop.close()
+                    
+            except Exception as e:
+                return f"Error calling MCP tool {server_name}.{tool_name}: {str(e)}"
+        
+        return mcp_tool_wrapper
+    
+    async def _call_mcp_tool(self, server_name, tool_name, arguments):
+        """Call an MCP tool"""
+        try:
+            from mcp import ClientSession
+            from mcp.client.stdio import stdio_client
+            from mcp import types
+            
+            server_params = self.mcp_sessions[server_name]['params']
+            
+            async with stdio_client(server_params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    
+                    # Call the tool
+                    result = await session.call_tool(tool_name, arguments=arguments)
+                    
+                    # Parse the result
+                    if result.content:
+                        content_parts = []
+                        for content in result.content:
+                            if isinstance(content, types.TextContent):
+                                content_parts.append(content.text)
+                            elif isinstance(content, types.ImageContent):
+                                content_parts.append(f"[Image: {content.mimeType}, {len(content.data)} bytes]")
+                            elif isinstance(content, types.EmbeddedResource):
+                                if hasattr(content.resource, 'text'):
+                                    content_parts.append(content.resource.text)
+                                else:
+                                    content_parts.append(f"[Resource: {content.resource.uri}]")
+                        
+                        return "\n".join(content_parts) if content_parts else "Tool executed successfully"
+                    
+                    # Check for structured content
+                    if hasattr(result, 'structuredContent') and result.structuredContent:
+                        return json.dumps(result.structuredContent, indent=2)
+                    
+                    return "Tool executed successfully"
+                    
+        except Exception as e:
+            return f"Error executing MCP tool: {str(e)}"
     
     def create_assistant_and_thread(self, files=None, code_interpreter=False, retrieval=False, bot_intro=None):
         tools = []
