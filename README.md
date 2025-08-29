@@ -137,6 +137,258 @@ callback = config5.handle_oauth_callback(code)
 response = config5.make_api_call_by_path(path, "POST", params=your_params, user_token=callback, is_json=True)
 ```
 
+## MCP (Model Context Protocol) Integration
+
+GPTPlugins4All now supports MCP integration, allowing you to connect to external MCP servers and use their tools seamlessly within your AI assistants.
+
+### What is MCP?
+
+MCP (Model Context Protocol) is a standard for connecting AI assistants to external tools and data sources. It allows you to extend your assistant's capabilities with specialized tools like web scraping, browser automation, file operations, and more.
+
+### Prerequisites
+
+#### 1. Install MCP Library
+```bash
+pip install mcp
+```
+
+#### 2. Install Node.js and npm
+MCP servers often run as Node.js applications. Install Node.js from [nodejs.org](https://nodejs.org/) or using a package manager:
+
+```bash
+# macOS with Homebrew
+brew install node
+
+# Ubuntu/Debian
+sudo apt install nodejs npm
+
+# Windows with Chocolatey
+choco install nodejs
+```
+
+#### 3. Install MCP Servers
+
+Install the MCP servers you want to use:
+
+```bash
+# Playwright MCP (browser automation)
+npm install -g @playwright/mcp
+
+# Firecrawl MCP (advanced web scraping)
+npm install -g firecrawl-mcp
+
+# Other popular MCP servers
+npm install -g @modelcontextprotocol/server-filesystem
+npm install -g @modelcontextprotocol/server-sqlite
+```
+
+### Setting Up MCP with GPTPlugins4All
+
+#### Basic MCP Configuration
+
+```python
+from GPTPlugins4All.assistant import Assistant
+
+# Configure MCP servers
+mcp_servers = {
+    "playwright": {
+        "command": "npx",
+        "args": ["@playwright/mcp@latest"]
+    },
+    "firecrawl": {
+        "command": "npx", 
+        "args": ["-y", "firecrawl-mcp"],
+        "env": {
+            "FIRECRAWL_API_URL": "https://api.firecrawl.dev"  # Optional: custom Firecrawl instance
+        }
+    },
+    "filesystem": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/directory"]
+    }
+}
+
+# Create assistant with MCP capabilities
+assistant = Assistant(
+    configs=[],  # Your existing API configs
+    name="MCP-Enabled Assistant",
+    instructions="You have access to web scraping, browser automation, and file system tools.",
+    model="gpt-4o",
+    old_mode=True,
+    max_tokens=2000,
+    mcp_servers=mcp_servers  # Add MCP servers here
+)
+```
+
+#### Available MCP Tools
+
+Once configured, your assistant automatically gains access to all tools from the connected MCP servers:
+
+**Playwright Tools (Browser Automation):**
+- `mcp_playwright_browser_navigate` - Navigate to URLs
+- `mcp_playwright_browser_click` - Click elements
+- `mcp_playwright_browser_type` - Type text
+- `mcp_playwright_browser_screenshot` - Take screenshots
+- `mcp_playwright_browser_fill_form` - Fill forms
+- And 15+ more browser automation tools
+
+**Firecrawl Tools (Advanced Web Scraping):**
+- `mcp_firecrawl_scrape` - Scrape single pages with advanced options
+- `mcp_firecrawl_crawl` - Crawl entire websites
+- `mcp_firecrawl_search` - Search the web and extract content
+- `mcp_firecrawl_map` - Discover all URLs on a website
+- `mcp_firecrawl_extract` - Extract structured data using AI
+
+### Complete Example
+
+```python
+from GPTPlugins4All.assistant import Assistant
+
+# MCP server configuration
+mcp_servers = {
+    "playwright": {
+        "command": "npx",
+        "args": ["@playwright/mcp@latest"]
+    },
+    "firecrawl": {
+        "command": "npx",
+        "args": ["-y", "firecrawl-mcp"]
+    }
+}
+
+# Create assistant
+assistant = Assistant(
+    configs=[],
+    name="Web Research Assistant",
+    instructions="""You are a web research assistant with powerful scraping and browser automation capabilities.
+    
+    You can:
+    - Navigate websites and take screenshots
+    - Fill out forms and interact with web pages
+    - Scrape content from any website
+    - Search the web and extract relevant information
+    - Crawl entire websites for comprehensive data
+    - Extract structured data from web pages
+    
+    Always use the most appropriate tool for each task.""",
+    model="gpt-4o",
+    old_mode=True,
+    max_tokens=3000,
+    mcp_servers=mcp_servers
+)
+
+# The assistant now has access to all MCP tools automatically!
+# You can interact with it normally, and it will use MCP tools as needed
+response = assistant.handle_old_mode("Please scrape the latest news from example.com and take a screenshot")
+```
+
+### MCP Server Configuration Options
+
+Each MCP server configuration supports these options:
+
+```python
+{
+    "server_name": {
+        "command": "npx",           # Command to run the server
+        "args": ["server-package"], # Arguments for the command
+        "env": {                    # Environment variables
+            "API_KEY": "your-key",
+            "CONFIG_OPTION": "value"
+        }
+    }
+}
+```
+
+### Popular MCP Servers
+
+| Server | Package | Description |
+|--------|---------|-------------|
+| Playwright | `@playwright/mcp` | Browser automation and web interaction |
+| Firecrawl | `firecrawl-mcp` | Advanced web scraping and crawling |
+| Filesystem | `@modelcontextprotocol/server-filesystem` | File system operations |
+| SQLite | `@modelcontextprotocol/server-sqlite` | Database operations |
+| GitHub | `@modelcontextprotocol/server-github` | GitHub API integration |
+| Slack | `@modelcontextprotocol/server-slack` | Slack API integration |
+
+### Troubleshooting MCP Setup
+
+#### Common Issues
+
+1. **"MCP library not available"**
+   ```bash
+   pip install mcp
+   ```
+
+2. **"Command not found: npx"**
+   ```bash
+   # Install Node.js and npm first
+   npm install -g npx
+   ```
+
+3. **MCP server fails to start**
+   - Check that the server package is installed globally
+   - Verify Node.js version compatibility
+   - Check server-specific requirements
+
+4. **No tools loaded from MCP server**
+   - Verify server configuration is correct
+   - Check server logs for errors
+   - Ensure required environment variables are set
+
+#### Testing MCP Integration
+
+Run the test suite to verify MCP integration:
+
+```bash
+python test_suite.py mcp
+```
+
+This will test connections to Playwright and Firecrawl MCP servers and verify that tools are loaded correctly.
+
+### Advanced MCP Usage
+
+#### Custom MCP Server Configuration
+
+You can create custom MCP server configurations for specialized use cases:
+
+```python
+mcp_servers = {
+    "custom_scraper": {
+        "command": "python",
+        "args": ["/path/to/your/mcp_server.py"],
+        "env": {
+            "CUSTOM_API_KEY": "your-api-key",
+            "DEBUG": "true"
+        }
+    }
+}
+```
+
+#### Conditional MCP Loading
+
+Load MCP servers conditionally based on environment or requirements:
+
+```python
+import os
+
+mcp_servers = {}
+
+# Only load Playwright if browser automation is needed
+if os.getenv("ENABLE_BROWSER_AUTOMATION"):
+    mcp_servers["playwright"] = {
+        "command": "npx",
+        "args": ["@playwright/mcp@latest"]
+    }
+
+# Only load Firecrawl if API key is available
+if os.getenv("FIRECRAWL_API_KEY"):
+    mcp_servers["firecrawl"] = {
+        "command": "npx",
+        "args": ["-y", "firecrawl-mcp"],
+        "env": {"FIRECRAWL_API_KEY": os.getenv("FIRECRAWL_API_KEY")}
+    }
+```
+
 ## Contributing
 
 Contributions are welcome! Please check out the [contributing guidelines](CONTRIBUTING.md).
