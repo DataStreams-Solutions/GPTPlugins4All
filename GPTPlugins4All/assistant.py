@@ -42,13 +42,13 @@ def leftTruncate(text, length):
         return text
 
 def _playwright_scrape_subprocess(url):
-    """Run Playwright in a subprocess with Docker-compatible settings"""
+    """Run Playwright in a subprocess with Docker-compatible settings and enhanced JS handling"""
     import subprocess
     import sys
     import json
     import os
     
-    # Create a more robust Python script for Docker environments
+    # Create a more robust Python script for Docker environments and JS-heavy sites
     script = f'''
 import sys
 import json
@@ -78,12 +78,39 @@ try:
             'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }})
         
-        page.goto("{url}", timeout=60000, wait_until='networkidle')
+        # Navigate to the URL
+        page.goto("{url}", timeout=60000, wait_until='domcontentloaded')
+        
+        # Wait for body to be present
         page.wait_for_selector("body", timeout=30000)
         
-        # Wait a bit more for dynamic content
-        page.wait_for_timeout(2000)
+        # For JS-heavy sites like Next.js, wait for content to load
+        # Check if this looks like a loading page
+        initial_content = page.content()
+        if 'loader' in initial_content.lower() or len(initial_content) < 5000:
+            print("Detected loading page, waiting longer for content...", file=sys.stderr)
+            
+            # Wait for network to be idle (all requests finished)
+            try:
+                page.wait_for_load_state('networkidle', timeout=30000)
+            except:
+                pass
+            
+            # Wait for any content changes (JS rendering)
+            page.wait_for_timeout(5000)
+            
+            # Try waiting for common content indicators
+            try:
+                # Wait for any of these common elements that indicate content loaded
+                page.wait_for_selector('main, article, .content, #content, [role="main"]', timeout=10000)
+            except:
+                # If no common content selectors, just wait a bit more
+                page.wait_for_timeout(3000)
+        else:
+            # Regular wait for non-loading pages
+            page.wait_for_timeout(2000)
         
+        # Get final content
         content = page.content()
         browser.close()
         
@@ -118,7 +145,7 @@ except Exception as e:
             [sys.executable, '-c', script], 
             capture_output=True, 
             text=True, 
-            timeout=120,
+            timeout=180,  # Increased timeout for JS-heavy sites
             env=env
         )
         
@@ -155,7 +182,7 @@ except Exception as e:
 def scrape_text(url, length):
     import re
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 6.2; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36'}
-    response = requests.get(url, verify=False, headers=headers)
+    response = requests.get(url, verify=False, headers=headers, allow_redirects=True)
     if not isinstance(length, int):
         length = 3000
     if response.status_code >= 400:
@@ -163,12 +190,37 @@ def scrape_text(url, length):
 
     # Check if we need to fall back to headless browser
     response_text = response.text
-    # More comprehensive check: small content OR no links (indicating JS-heavy page)
+    
+    # Enhanced detection for JS-heavy sites
     has_links = bool(re.search(r'<a\s+(?:[^>]*?\s+)?href="([^"]*)"', response_text))
     content_too_small = len(response_text.strip()) < 100
     
-    if content_too_small or not has_links:
-        print(f"Falling back to headless browser for {url} (content_small: {content_too_small}, has_links: {has_links})")
+    # Additional checks for JS-heavy sites
+    is_loading_page = bool(re.search(r'(loader|loading|spinner)', response_text.lower()))
+    is_nextjs_app = bool(re.search(r'(__next|next\.js|_next/static)', response_text.lower()))
+    is_react_app = bool(re.search(r'(react|__react)', response_text.lower()))
+    has_minimal_content = len(re.sub(r'<[^>]+>', '', response_text).strip()) < 200
+    
+    # Trigger Playwright if any of these conditions are met
+    needs_playwright = (
+        content_too_small or 
+        not has_links or 
+        is_loading_page or 
+        is_nextjs_app or 
+        is_react_app or 
+        has_minimal_content
+    )
+    
+    if needs_playwright:
+        reasons = []
+        if content_too_small: reasons.append("content_too_small")
+        if not has_links: reasons.append("no_links")
+        if is_loading_page: reasons.append("loading_page")
+        if is_nextjs_app: reasons.append("nextjs_app")
+        if is_react_app: reasons.append("react_app")
+        if has_minimal_content: reasons.append("minimal_content")
+        
+        print(f"Falling back to headless browser for {url} ({', '.join(reasons)})")
         playwright_content = _playwright_scrape_subprocess(url)
         if playwright_content:
             response_text = playwright_content
