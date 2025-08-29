@@ -42,42 +42,109 @@ def leftTruncate(text, length):
         return text
 
 def _playwright_scrape_subprocess(url):
-    """Run Playwright in a subprocess to avoid conflicts with main application"""
+    """Run Playwright in a subprocess with Docker-compatible settings"""
     import subprocess
     import sys
     import json
+    import os
     
-    # Create a small Python script to run Playwright
+    # Create a more robust Python script for Docker environments
     script = f'''
 import sys
 import json
+import os
 try:
     from playwright.sync_api import sync_playwright
+    
+    # Configure for headless Docker environment
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--single-process',
+                '--disable-gpu'
+            ]
+        )
         page = browser.new_page()
-        page.goto("{url}", timeout=60000)
+        
+        # Set user agent to avoid bot detection
+        page.set_extra_http_headers({{
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }})
+        
+        page.goto("{url}", timeout=60000, wait_until='networkidle')
         page.wait_for_selector("body", timeout=30000)
+        
+        # Wait a bit more for dynamic content
+        page.wait_for_timeout(2000)
+        
         content = page.content()
         browser.close()
-        print(json.dumps({{"success": True, "content": content}}))
+        
+        print(json.dumps({{"success": True, "content": content, "length": len(content)}}))
+        
 except Exception as e:
-    print(json.dumps({{"success": False, "error": str(e)}}))
+    import traceback
+    error_details = {{
+        "error": str(e),
+        "traceback": traceback.format_exc(),
+        "playwright_available": False
+    }}
+    
+    try:
+        from playwright.sync_api import sync_playwright
+        error_details["playwright_available"] = True
+    except ImportError:
+        pass
+        
+    print(json.dumps({{"success": False, **error_details}}))
 '''
     
     try:
-        result = subprocess.run([sys.executable, '-c', script], 
-                              capture_output=True, text=True, timeout=120)
+        # Set environment variables for subprocess
+        env = os.environ.copy()
+        env.update({
+            'PLAYWRIGHT_BROWSERS_PATH': '/ms-playwright',
+            'DISPLAY': ':99'  # Virtual display for Docker
+        })
+        
+        result = subprocess.run(
+            [sys.executable, '-c', script], 
+            capture_output=True, 
+            text=True, 
+            timeout=120,
+            env=env
+        )
+        
         if result.returncode == 0:
-            data = json.loads(result.stdout.strip())
-            if data.get("success"):
-                return data.get("content", "")
-            else:
-                print(f"Playwright subprocess error: {data.get('error')}")
+            try:
+                data = json.loads(result.stdout.strip())
+                if data.get("success"):
+                    content = data.get("content", "")
+                    print(f"Playwright subprocess success: {data.get('length', 0)} characters")
+                    return content
+                else:
+                    print(f"Playwright subprocess error: {data.get('error')}")
+                    print(f"Playwright available: {data.get('playwright_available')}")
+                    if data.get('traceback'):
+                        print(f"Traceback: {data.get('traceback')}")
+                    return None
+            except json.JSONDecodeError as e:
+                print(f"Failed to parse subprocess output: {e}")
+                print(f"Raw output: {result.stdout}")
                 return None
         else:
-            print(f"Subprocess failed with return code {result.returncode}: {result.stderr}")
+            print(f"Subprocess failed with return code {result.returncode}")
+            print(f"STDOUT: {result.stdout}")
+            print(f"STDERR: {result.stderr}")
             return None
+            
     except subprocess.TimeoutExpired:
         print("Playwright subprocess timed out")
         return None
