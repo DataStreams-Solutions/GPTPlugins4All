@@ -16,7 +16,6 @@ load_dotenv()
 from typing import Optional
 import tiktoken
 encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
-CHROME = os.getenv("CHROMIUM_PATH", "/usr/bin/chromium")
 
 
 cost_dict = {'o3-mini': 110/1000000, 'gpt-3.5-turbo': 1/1000000, 'o1': 60000/1000000, 'gpt-4o': 1000/1000000, 'gpt-4o-mini': 60/1000000}
@@ -43,154 +42,42 @@ def leftTruncate(text, length):
         return text
 
 def _playwright_scrape_subprocess(url):
-    """Run Playwright in a subprocess with Docker-compatible settings and enhanced JS handling"""
+    """Run Playwright in a subprocess to avoid conflicts with main application"""
     import subprocess
     import sys
     import json
-    import os
     
-    # Create a more robust Python script for Docker environments and JS-heavy sites
+    # Create a small Python script to run Playwright
     script = f'''
 import sys
 import json
-import os
 try:
     from playwright.sync_api import sync_playwright
-    
-    # Configure for headless Docker environment
     with sync_playwright() as p:
-        # Check if browser is available before launching
-        try:
-            browser_path = p.chromium.executable_path
-            print(f"Browser path: {{browser_path}}", file=sys.stderr)
-        except Exception as path_error:
-            print(f"Browser path error: {{path_error}}", file=sys.stderr)
-            # Try to install browsers if they're missing
-            import subprocess
-            try:
-                subprocess.run([sys.executable, '-m', 'playwright', 'install', 'chromium'], 
-                             check=True, capture_output=True, timeout=300)
-                print("Browsers installed successfully", file=sys.stderr)
-            except Exception as install_error:
-                print(f"Browser installation failed: {{install_error}}", file=sys.stderr)
-                raise Exception("Browsers not available and installation failed")
-        
-        browser = p.chromium.launch(
-        executable_path=CHROME,              
-        headless=True,
-        args=[
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--disable-vulkan",
-            "--use-angle=swiftshader",
-            "--use-gl=swiftshader",
-            "--disable-features=UseOzonePlatform",
-        ],
-        ignore_default_args=["--single-process","--no-zygote"],  # avoid headless_shell quirks
-    )
+        browser = p.chromium.launch(headless=True)
         page = browser.new_page()
-        
-        # Set user agent to avoid bot detection
-        page.set_extra_http_headers({{
-            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }})
-        
-        # Navigate to the URL
-        page.goto("{url}", timeout=60000, wait_until='domcontentloaded')
-        
-        # Wait for body to be present
+        page.goto("{url}", timeout=60000)
         page.wait_for_selector("body", timeout=30000)
-        
-        # For JS-heavy sites like Next.js, wait for content to load
-        # Check if this looks like a loading page
-        initial_content = page.content()
-        if 'loader' in initial_content.lower() or len(initial_content) < 5000:
-            print("Detected loading page, waiting longer for content...", file=sys.stderr)
-            
-            # Wait for network to be idle (all requests finished)
-            try:
-                page.wait_for_load_state('networkidle', timeout=30000)
-            except:
-                pass
-            
-            # Wait for any content changes (JS rendering)
-            page.wait_for_timeout(5000)
-            
-            # Try waiting for common content indicators
-            try:
-                # Wait for any of these common elements that indicate content loaded
-                page.wait_for_selector('main, article, .content, #content, [role="main"]', timeout=10000)
-            except:
-                # If no common content selectors, just wait a bit more
-                page.wait_for_timeout(3000)
-        else:
-            # Regular wait for non-loading pages
-            page.wait_for_timeout(2000)
-        
-        # Get final content
         content = page.content()
         browser.close()
-        
-        print(json.dumps({{"success": True, "content": content, "length": len(content)}}))
-        
+        print(json.dumps({{"success": True, "content": content}}))
 except Exception as e:
-    import traceback
-    error_details = {{
-        "error": str(e),
-        "traceback": traceback.format_exc(),
-        "playwright_available": False
-    }}
-    
-    try:
-        from playwright.sync_api import sync_playwright
-        error_details["playwright_available"] = True
-    except ImportError:
-        pass
-        
-    print(json.dumps({{"success": False, **error_details}}))
+    print(json.dumps({{"success": False, "error": str(e)}}))
 '''
     
     try:
-        # Set environment variables for subprocess
-        env = os.environ.copy()
-        env.update({
-            'PLAYWRIGHT_BROWSERS_PATH': '/ms-playwright',
-            'DISPLAY': ':99',  # Virtual display for Docker
-            'PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD': '0'  # Ensure browsers are available
-        })
-        
-        result = subprocess.run(
-            [sys.executable, '-c', script], 
-            capture_output=True, 
-            text=True, 
-            timeout=180,  # Increased timeout for JS-heavy sites
-            env=env
-        )
-        
+        result = subprocess.run([sys.executable, '-c', script], 
+                              capture_output=True, text=True, timeout=120)
         if result.returncode == 0:
-            try:
-                data = json.loads(result.stdout.strip())
-                if data.get("success"):
-                    content = data.get("content", "")
-                    print(f"Playwright subprocess success: {data.get('length', 0)} characters")
-                    return content
-                else:
-                    print(f"Playwright subprocess error: {data.get('error')}")
-                    print(f"Playwright available: {data.get('playwright_available')}")
-                    if data.get('traceback'):
-                        print(f"Traceback: {data.get('traceback')}")
-                    return None
-            except json.JSONDecodeError as e:
-                print(f"Failed to parse subprocess output: {e}")
-                print(f"Raw output: {result.stdout}")
+            data = json.loads(result.stdout.strip())
+            if data.get("success"):
+                return data.get("content", "")
+            else:
+                print(f"Playwright subprocess error: {data.get('error')}")
                 return None
         else:
-            print(f"Subprocess failed with return code {result.returncode}")
-            print(f"STDOUT: {result.stdout}")
-            print(f"STDERR: {result.stderr}")
+            print(f"Subprocess failed with return code {result.returncode}: {result.stderr}")
             return None
-            
     except subprocess.TimeoutExpired:
         print("Playwright subprocess timed out")
         return None
@@ -201,7 +88,7 @@ except Exception as e:
 def scrape_text(url, length):
     import re
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 6.2; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36'}
-    response = requests.get(url, verify=False, headers=headers, allow_redirects=True)
+    response = requests.get(url, verify=False, headers=headers)
     if not isinstance(length, int):
         length = 3000
     if response.status_code >= 400:
@@ -209,37 +96,12 @@ def scrape_text(url, length):
 
     # Check if we need to fall back to headless browser
     response_text = response.text
-    
-    # Enhanced detection for JS-heavy sites
+    # More comprehensive check: small content OR no links (indicating JS-heavy page)
     has_links = bool(re.search(r'<a\s+(?:[^>]*?\s+)?href="([^"]*)"', response_text))
     content_too_small = len(response_text.strip()) < 100
     
-    # Additional checks for JS-heavy sites
-    is_loading_page = bool(re.search(r'(loader|loading|spinner)', response_text.lower()))
-    is_nextjs_app = bool(re.search(r'(__next|next\.js|_next/static)', response_text.lower()))
-    is_react_app = bool(re.search(r'(react|__react)', response_text.lower()))
-    has_minimal_content = len(re.sub(r'<[^>]+>', '', response_text).strip()) < 200
-    
-    # Trigger Playwright if any of these conditions are met
-    needs_playwright = (
-        content_too_small or 
-        not has_links or 
-        is_loading_page or 
-        is_nextjs_app or 
-        is_react_app or 
-        has_minimal_content
-    )
-    
-    if needs_playwright:
-        reasons = []
-        if content_too_small: reasons.append("content_too_small")
-        if not has_links: reasons.append("no_links")
-        if is_loading_page: reasons.append("loading_page")
-        if is_nextjs_app: reasons.append("nextjs_app")
-        if is_react_app: reasons.append("react_app")
-        if has_minimal_content: reasons.append("minimal_content")
-        
-        print(f"Falling back to headless browser for {url} ({', '.join(reasons)})")
+    if content_too_small or not has_links:
+        print(f"Falling back to headless browser for {url} (content_small: {content_too_small}, has_links: {has_links})")
         playwright_content = _playwright_scrape_subprocess(url)
         if playwright_content:
             response_text = playwright_content
