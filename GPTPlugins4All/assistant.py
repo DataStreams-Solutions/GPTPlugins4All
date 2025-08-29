@@ -16,6 +16,7 @@ load_dotenv()
 from typing import Optional
 import tiktoken
 encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
+CHROME = os.getenv("CHROMIUM_PATH", "/usr/bin/chromium")
 
 
 cost_dict = {'o3-mini': 110/1000000, 'gpt-3.5-turbo': 1/1000000, 'o1': 60000/1000000, 'gpt-4o': 1000/1000000, 'gpt-4o-mini': 60/1000000}
@@ -58,19 +59,36 @@ try:
     
     # Configure for headless Docker environment
     with sync_playwright() as p:
+        # Check if browser is available before launching
+        try:
+            browser_path = p.chromium.executable_path
+            print(f"Browser path: {{browser_path}}", file=sys.stderr)
+        except Exception as path_error:
+            print(f"Browser path error: {{path_error}}", file=sys.stderr)
+            # Try to install browsers if they're missing
+            import subprocess
+            try:
+                subprocess.run([sys.executable, '-m', 'playwright', 'install', 'chromium'], 
+                             check=True, capture_output=True, timeout=300)
+                print("Browsers installed successfully", file=sys.stderr)
+            except Exception as install_error:
+                print(f"Browser installation failed: {{install_error}}", file=sys.stderr)
+                raise Exception("Browsers not available and installation failed")
+        
         browser = p.chromium.launch(
-            headless=True,
-            args=[
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--single-process',
-                '--disable-gpu'
-            ]
-        )
+        executable_path=CHROME,              
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-vulkan",
+            "--use-angle=swiftshader",
+            "--use-gl=swiftshader",
+            "--disable-features=UseOzonePlatform",
+        ],
+        ignore_default_args=["--single-process","--no-zygote"],  # avoid headless_shell quirks
+    )
         page = browser.new_page()
         
         # Set user agent to avoid bot detection
@@ -138,7 +156,8 @@ except Exception as e:
         env = os.environ.copy()
         env.update({
             'PLAYWRIGHT_BROWSERS_PATH': '/ms-playwright',
-            'DISPLAY': ':99'  # Virtual display for Docker
+            'DISPLAY': ':99',  # Virtual display for Docker
+            'PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD': '0'  # Ensure browsers are available
         })
         
         result = subprocess.run(
