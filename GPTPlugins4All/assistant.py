@@ -232,7 +232,7 @@ def generate_function_name(api_call):
     return function_name
 
 class Assistant:
-    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None, suggest_responses=False, api_calls=[], sources=None, initial_suggestions=None, mcp_servers=None, emit_tool_preamble=True, stop_check=None):
+    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None, suggest_responses=False, api_calls=[], sources=None, initial_suggestions=None, mcp_servers=None, emit_tool_preamble=True, stop_check=None, async_tools=None):
         try:
             from openai import OpenAI
         except ImportError:
@@ -264,6 +264,7 @@ class Assistant:
         self.search_window = search_window
         self.emit_tool_preamble = emit_tool_preamble
         self.stop_check = stop_check
+        self.async_tools = async_tools or []
         self.other_tools = other_tools or []
         self.other_functions = other_functions or {}
         self.initial_suggestions = initial_suggestions
@@ -279,7 +280,6 @@ class Assistant:
         self.suggest_responses = suggest_responses
         if self.suggest_responses:
             self.instructions += "\nIn addition to the above, *always* give the user potential replies (eg quick-replies) to follow up with in this format: \n[\"response1\", \"response2\", \"response3\"]"
-            print('suggestions enabled')
         if is_json is not None:
             self.is_json = is_json
         if openai_key is None:
@@ -335,6 +335,17 @@ class Assistant:
             purpose='assistants'
         )
         self.openai_client.beta.assistants.update(self.assistant_id, tool_resources={"code_interpreter": {"file_ids": [file.id]}})
+
+    def _async_tool_system_hint(self, tool_names):
+        if not tool_names:
+            return None
+        tool_list = ", ".join(sorted(set(tool_names)))
+        return (
+            f"Async tool(s) just started: {tool_list}. "
+            "Do NOT call them again right now. "
+            "Respond to the user by acknowledging the launch and what will happen next. "
+            "If the tool output indicates a failure or missing data, explain the issue and ask a targeted follow-up."
+        )
     
     def _build_chat_data(self, base_data):
         """Helper method to build chat completion data with correct token parameter"""
@@ -730,6 +741,7 @@ class Assistant:
             if self.raw_mode == False:
                 while completion.choices[0].message.role == "assistant" and completion.choices[0].message.tool_calls:
                     tool_outputs = []
+                    async_tool_names = []
                     for tool_call in completion.choices[0].message.tool_calls:
                         result = self.execute_function(tool_call.function.name, tool_call.function.arguments, user_tokens)
                         output = {
@@ -741,8 +753,13 @@ class Assistant:
                         tool_outputs.append(output)
                         if self.event_listener is not None:
                             self.event_listener(output)
+                        if tool_call.function.name in self.async_tools:
+                            async_tool_names.append(tool_call.function.name)
                     data_['messages'] = data_['messages'] + [{"role": "system", "content": "Tool outputs from most recent attempt" + json.dumps(tool_outputs) + "\n If the above indicates an error, change the input and try again"}]
                     thread["messages"].append({"role": "system", "content": "Tool outputs from most recent attempt: " + json.dumps(tool_outputs)})
+                    async_hint = self._async_tool_system_hint(async_tool_names)
+                    if async_hint:
+                        data_['messages'].append({"role": "system", "content": async_hint})
 
                     completion = self.openai_client.chat.completions.create(**data_)
             print(completion.choices[0].message)
@@ -776,9 +793,7 @@ class Assistant:
         thread = self.get_thread(self.thread_id)
         if thread is None:
             thread = {"messages": []}
-        print('got here')
         #print(thread)
-        print('streaming -------------------')
         
         content = [{"type": "text", "text": user_message}]
         if image_paths is not None:
@@ -869,6 +884,7 @@ class Assistant:
 
                 result = ""
                 tool_calls = {}
+                tool_call_ids_by_index = {}
                 finish_reason = None
 
                 for response_chunk in completion:
@@ -882,9 +898,21 @@ class Assistant:
 
                     if delta.tool_calls:
                         for tool_call in delta.tool_calls:
-                            print('tool call')
-                            print(tool_call)
-                            call_id = tool_call.id or f"call_{len(tool_calls)}"
+                            call_id = tool_call.id
+                            try:
+                                idx = tool_call.index
+                            except Exception:
+                                idx = None
+                            if call_id:
+                                if idx is not None:
+                                    tool_call_ids_by_index[idx] = call_id
+                            else:
+                                if idx is not None and idx in tool_call_ids_by_index:
+                                    call_id = tool_call_ids_by_index[idx]
+                                elif len(tool_calls) == 1:
+                                    call_id = next(iter(tool_calls.keys()))
+                                else:
+                                    call_id = f"call_{len(tool_calls)}"
                             if call_id not in tool_calls:
                                 tool_calls[call_id] = {"name": None, "arguments": ""}
                             if tool_call.function.name:
@@ -895,6 +923,7 @@ class Assistant:
                 if tool_calls:
                     tool_outputs = []
                     assistant_tool_calls = []
+                    async_tool_names = []
                     for call_id, info in tool_calls.items():
                         if self.stop_check and self.stop_check():
                             return
@@ -925,6 +954,7 @@ class Assistant:
                                 "tool_name": tool_name,
                                 "tool_arguments": tool_args
                             }
+                            output_result = {"error": str(e)}
                         tool_outputs.append(output)
                         assistant_tool_calls.append({
                             "id": call_id,
@@ -933,6 +963,8 @@ class Assistant:
                         })
                         if self.event_listener is not None:
                             self.event_listener(output)
+                        if tool_name in self.async_tools:
+                            async_tool_names.append(tool_name)
 
                     data_['messages'] = data_['messages'] + [
                         {"role": "assistant", "content": None, "tool_calls": assistant_tool_calls}
@@ -948,6 +980,9 @@ class Assistant:
                         self.put_thread(self.thread_id, thread["messages"])
                     except Exception:
                         pass
+                    async_hint = self._async_tool_system_hint(async_tool_names)
+                    if async_hint:
+                        data_['messages'].append({"role": "system", "content": async_hint})
                     done = False
                     continue
 
@@ -1069,10 +1104,7 @@ class Assistant:
         try:
             x = json.loads(arguments)
         except Exception as e:
-            print(e)
             return "JSON not valid"
-        print(function_name)
-        print(arguments)
         if function_name == "search_google":
             return search_google(x["query"])
         if function_name == "scrape_text":
