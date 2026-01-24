@@ -862,86 +862,78 @@ class Assistant:
         try:
             while not done:
                 completion = self.openai_client.chat.completions.create(**data_)
-                #print(completion)
 
                 result = ""
-                arg_acc =''
-                tool_name = ''
-                tool_outputs = []
-                tool_invoked = False
+                tool_calls = {}
+                finish_reason = None
+
                 for response_chunk in completion:
                     delta = response_chunk.choices[0].delta
+                    finish_reason = response_chunk.choices[0].finish_reason or finish_reason
                     if delta.content is not None:
-                        done = True
                         result += delta.content
                         yield delta.content
-                    
+
                     if delta.tool_calls:
-                        #yield "Hang on, gotta do some stuff"
                         for tool_call in delta.tool_calls:
                             print('tool call')
                             print(tool_call)
-                            
-                            arg_acc += tool_call.function.arguments
-                            #check that arguments are complete
-                            if tool_call.function.name != None:
-                                tool_name = tool_call.function.name
-                                #if self.event_listener is not None:
-                                #    self.event_listener("Hang on, gotta look up some stuff")
-                                #    sys_message = "Hang on, gotta "+ tool_name
-                                #    yield sys_message
-                                #    print('telling system to hang on')
-                            print(arg_acc)
-                            if len(arg_acc) > 0 and arg_acc[-1] != '}':
-                                continue
-                            #check that it is a valid json
-                            
-                            try:
-                                x = json.loads(arg_acc)
-                            except Exception as e:
-                                continue
-                            #replace underscore with space
-                            tool_name_for_mess = tool_name.replace('_', ' ')
-                            if tool_name == 'view_page':
-                                tool_name_for_mess = 'view a page'
-                            if tool_name == 'transfer':
-                                tool_name_for_mess = 'transfer your call'
-                            sys_message = "Hang on, gotta "+ tool_name_for_mess
-                            yield sys_message
-                            try:
-                                print(arg_acc)
-                                
-                                result = self.execute_function(tool_name, arg_acc, user_tokens)
-                                arg_acc = ''
-                                tool_name = ''
-                                
-                                print(result)
-                                output = {
-                                    "tool_call_id": tool_call.id,
-                                    "output": json.dumps(result),
-                                    "tool_name": tool_call.function.name,
-                                    "tool_arguments": tool_call.function.arguments
-                                }
-                                tool_outputs.append(output)
-                                if self.event_listener is not None:
-                                    self.event_listener(output)
-                            except Exception as e:
-                                print(f"Error executing tool: {e}")
-                                output = {
-                                    "tool_call_id": tool_call.id,
-                                    "output": json.dumps({"error": str(e)}),
-                                    "tool_name": tool_call.function.name,
-                                    "tool_arguments": tool_call.function.arguments
-                                }
-                                tool_outputs.append(output)
-                                if self.event_listener is not None:
-                                    self.event_listener(output)
-                            tool_invoked = True
+                            call_id = tool_call.id or f"call_{len(tool_calls)}"
+                            if call_id not in tool_calls:
+                                tool_calls[call_id] = {"name": None, "arguments": ""}
+                            if tool_call.function.name:
+                                tool_calls[call_id]["name"] = tool_call.function.name
+                            if tool_call.function.arguments:
+                                tool_calls[call_id]["arguments"] += tool_call.function.arguments
 
-                        if tool_invoked:
-                            break
-                if tool_invoked:
-                    data_['messages'] = data_['messages'] + [{"role": "system", "content": "Tool outputs from most recent attempt: " + json.dumps(tool_outputs)}]
+                if tool_calls:
+                    tool_outputs = []
+                    assistant_tool_calls = []
+                    for call_id, info in tool_calls.items():
+                        tool_name = info.get("name")
+                        tool_args = info.get("arguments") or "{}"
+                        if not tool_name:
+                            continue
+                        tool_name_for_mess = tool_name.replace('_', ' ')
+                        if tool_name == 'view_page':
+                            tool_name_for_mess = 'view a page'
+                        if tool_name == 'transfer':
+                            tool_name_for_mess = 'transfer your call'
+                        yield "Hang on, gotta " + tool_name_for_mess
+                        try:
+                            output_result = self.execute_function(tool_name, tool_args, user_tokens)
+                            output = {
+                                "tool_call_id": call_id,
+                                "output": json.dumps(output_result),
+                                "tool_name": tool_name,
+                                "tool_arguments": tool_args
+                            }
+                        except Exception as e:
+                            print(f"Error executing tool: {e}")
+                            output = {
+                                "tool_call_id": call_id,
+                                "output": json.dumps({"error": str(e)}),
+                                "tool_name": tool_name,
+                                "tool_arguments": tool_args
+                            }
+                        tool_outputs.append(output)
+                        assistant_tool_calls.append({
+                            "id": call_id,
+                            "type": "function",
+                            "function": {"name": tool_name, "arguments": tool_args}
+                        })
+                        if self.event_listener is not None:
+                            self.event_listener(output)
+
+                    data_['messages'] = data_['messages'] + [
+                        {"role": "assistant", "content": None, "tool_calls": assistant_tool_calls}
+                    ]
+                    for output in tool_outputs:
+                        data_['messages'].append({
+                            "role": "tool",
+                            "tool_call_id": output["tool_call_id"],
+                            "content": output["output"]
+                        })
                     try:
                         thread["messages"].append({"role": "system", "content": "Tool outputs from most recent attempt: " + json.dumps(tool_outputs)})
                         self.put_thread(self.thread_id, thread["messages"])
@@ -949,8 +941,9 @@ class Assistant:
                         pass
                     done = False
                     continue
-                    #completion = self.openai_client.chat.completions.create(**data_)
 
+                done = True
+                
             thread["messages"].append({"role": "assistant", "content": result})
             #self.put_thread(self.thread_id, thread["messages"])
             threading.Thread(target=self.put_thread, args=(self.thread_id, thread["messages"])).start()
