@@ -743,7 +743,7 @@ class Assistant:
                     thread["messages"].append({"role": "system", "content": "Tool outputs from most recent attempt: " + json.dumps(tool_outputs)})
 
                     completion = self.openai_client.chat.completions.create(**data_)
-
+            print(completion.choices[0].message)
             response_message = completion.choices[0].message.content
             print(response_message)
             thread["messages"].append({"role": "assistant", "content": response_message})
@@ -791,6 +791,10 @@ class Assistant:
         thread["messages"].append({"role": "user", "content": content, "timestamp": timestamp})
         if len(thread["messages"]) > self.max_messages:
             thread["messages"] = thread["messages"][-self.max_messages:]
+        try:
+            self.put_thread(self.thread_id, thread["messages"])
+        except Exception:
+            pass
         additional_context = ""
         if self.query_memory is not None:
             if self.embedding_client is not None:
@@ -861,9 +865,10 @@ class Assistant:
                 #print(completion)
 
                 result = ""
-                tool_calls = {}
                 arg_acc =''
                 tool_name = ''
+                tool_outputs = []
+                tool_invoked = False
                 for response_chunk in completion:
                     delta = response_chunk.choices[0].delta
                     if delta.content is not None:
@@ -872,10 +877,8 @@ class Assistant:
                         yield delta.content
                     
                     if delta.tool_calls:
-                        tool_outputs = []
                         #yield "Hang on, gotta do some stuff"
                         for tool_call in delta.tool_calls:
-                            tool_calls[tool_call.id] = tool_call
                             print('tool call')
                             print(tool_call)
                             
@@ -933,8 +936,19 @@ class Assistant:
                                 tool_outputs.append(output)
                                 if self.event_listener is not None:
                                     self.event_listener(output)
-                            
-                        data_['messages'] = data_['messages'] + [{"role": "system", "content": "Tool outputs from most recent attempt: " + json.dumps(tool_outputs)}]
+                            tool_invoked = True
+
+                        if tool_invoked:
+                            break
+                if tool_invoked:
+                    data_['messages'] = data_['messages'] + [{"role": "system", "content": "Tool outputs from most recent attempt: " + json.dumps(tool_outputs)}]
+                    try:
+                        thread["messages"].append({"role": "system", "content": "Tool outputs from most recent attempt: " + json.dumps(tool_outputs)})
+                        self.put_thread(self.thread_id, thread["messages"])
+                    except Exception:
+                        pass
+                    done = False
+                    continue
                     #completion = self.openai_client.chat.completions.create(**data_)
 
             thread["messages"].append({"role": "assistant", "content": result})

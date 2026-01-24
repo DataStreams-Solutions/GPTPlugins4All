@@ -7,6 +7,10 @@ why it returns empty strings in some environments.
 """
 
 import sys
+import os
+import pytest
+if os.getenv("INTEGRATION") != "1":
+    pytest.skip("Integration test (versabot scraping); set INTEGRATION=1 to run", allow_module_level=True)
 sys.path.append('GPTPlugins4All')
 
 from assistant import scrape_text

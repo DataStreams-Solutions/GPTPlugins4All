@@ -8,6 +8,10 @@ including MCP integration, scraping functionality, and assistant capabilities.
 
 import sys
 import os
+import pytest
+
+if os.getenv("INTEGRATION") != "1":
+    pytest.skip("Integration test (GPTPlugins4All suite); set INTEGRATION=1 to run", allow_module_level=True)
 import json
 import time
 sys.path.append('GPTPlugins4All')

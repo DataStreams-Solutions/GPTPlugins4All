@@ -4,6 +4,10 @@ Test script to verify Playwright works in Docker environment
 """
 import sys
 import os
+import pytest
+
+if os.getenv("INTEGRATION") != "1":
+    pytest.skip("Integration test (playwright); set INTEGRATION=1 to run", allow_module_level=True)
 sys.path.append('GPTPlugins4All')
 
 from assistant import scrape_text
