@@ -232,7 +232,7 @@ def generate_function_name(api_call):
     return function_name
 
 class Assistant:
-    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None, suggest_responses=False, api_calls=[], sources=None, initial_suggestions=None, mcp_servers=None, emit_tool_preamble=True):
+    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None, suggest_responses=False, api_calls=[], sources=None, initial_suggestions=None, mcp_servers=None, emit_tool_preamble=True, stop_check=None):
         try:
             from openai import OpenAI
         except ImportError:
@@ -263,6 +263,7 @@ class Assistant:
         self.view_pages = view_pages
         self.search_window = search_window
         self.emit_tool_preamble = emit_tool_preamble
+        self.stop_check = stop_check
         self.other_tools = other_tools or []
         self.other_functions = other_functions or {}
         self.initial_suggestions = initial_suggestions
@@ -862,6 +863,8 @@ class Assistant:
         done = False
         try:
             while not done:
+                if self.stop_check and self.stop_check():
+                    return
                 completion = self.openai_client.chat.completions.create(**data_)
 
                 result = ""
@@ -869,6 +872,8 @@ class Assistant:
                 finish_reason = None
 
                 for response_chunk in completion:
+                    if self.stop_check and self.stop_check():
+                        return
                     delta = response_chunk.choices[0].delta
                     finish_reason = response_chunk.choices[0].finish_reason or finish_reason
                     if delta.content is not None:
@@ -891,6 +896,8 @@ class Assistant:
                     tool_outputs = []
                     assistant_tool_calls = []
                     for call_id, info in tool_calls.items():
+                        if self.stop_check and self.stop_check():
+                            return
                         tool_name = info.get("name")
                         tool_args = info.get("arguments") or "{}"
                         if not tool_name:
