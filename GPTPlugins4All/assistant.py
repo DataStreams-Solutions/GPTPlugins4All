@@ -10,6 +10,8 @@ from googlesearch import search
 import base64
 import copy
 from datetime import datetime
+import logging
+import re
 
 load_dotenv()
 
@@ -17,6 +19,7 @@ from typing import Optional
 import tiktoken
 encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
 
+logger = logging.getLogger(__name__)
 
 cost_dict = {'o3-mini': 110/1000000, 'gpt-3.5-turbo': 1/1000000, 'o1': 60000/1000000, 'gpt-4o': 1000/1000000, 'gpt-4o-mini': 60/1000000}
 def search_google(query, num_results=6):
@@ -232,7 +235,7 @@ def generate_function_name(api_call):
     return function_name
 
 class Assistant:
-    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None, suggest_responses=False, api_calls=[], sources=None, initial_suggestions=None, mcp_servers=None, emit_tool_preamble=True, stop_check=None, async_tools=None):
+    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None, suggest_responses=False, api_calls=[], sources=None, initial_suggestions=None, mcp_servers=None, emit_tool_preamble=True, stop_check=None, async_tools=None, chat_completion_defaults=None, enable_context_compaction=False, context_budget_tokens=None, context_compact_threshold_ratio=0.82, context_compact_target_ratio=0.58, context_compact_keep_recent=18, tool_output_context_max_chars=1200):
         try:
             from openai import OpenAI
         except ImportError:
@@ -265,6 +268,13 @@ class Assistant:
         self.emit_tool_preamble = emit_tool_preamble
         self.stop_check = stop_check
         self.async_tools = async_tools or []
+        self.chat_completion_defaults = copy.deepcopy(chat_completion_defaults or {})
+        self.enable_context_compaction = bool(enable_context_compaction)
+        self.context_budget_tokens = int(context_budget_tokens or 0) if str(context_budget_tokens or "").strip() else 0
+        self.context_compact_threshold_ratio = float(context_compact_threshold_ratio or 0.82)
+        self.context_compact_target_ratio = float(context_compact_target_ratio or 0.58)
+        self.context_compact_keep_recent = max(6, int(context_compact_keep_recent or 18))
+        self.tool_output_context_max_chars = max(200, int(tool_output_context_max_chars or 1200))
         self.other_tools = other_tools or []
         self.other_functions = other_functions or {}
         self.initial_suggestions = initial_suggestions
@@ -282,6 +292,17 @@ class Assistant:
             self.instructions += "\nIn addition to the above, *always* give the user potential replies (eg quick-replies) to follow up with in this format: \n[\"response1\", \"response2\", \"response3\"]"
         if is_json is not None:
             self.is_json = is_json
+
+        # Normalize empty-string keys to None so callers can "omit" keys cleanly.
+        # This allows platform-key fallback behavior when OpenAI() is initialized
+        # without an explicit api_key.
+        if isinstance(openai_key, str) and not openai_key.strip():
+            openai_key = None
+        if isinstance(embedding_key, str) and not embedding_key.strip():
+            embedding_key = None
+        if isinstance(base_url, str) and not base_url.strip():
+            base_url = None
+
         if openai_key is None:
             if base_url is None or base_url == '' or base_url == 'https://api.openai.com':
                 self.openai_client = OpenAI()
@@ -349,7 +370,8 @@ class Assistant:
     
     def _build_chat_data(self, base_data):
         """Helper method to build chat completion data with correct token parameter"""
-        data = base_data.copy()
+        data = copy.deepcopy(self.chat_completion_defaults)
+        data.update(base_data)
         if 'gpt-5' in self.model.lower():
             if self.max_completion_tokens is not None:
                 data["max_completion_tokens"] = self.max_completion_tokens
@@ -357,6 +379,202 @@ class Assistant:
             if self.max_tokens is not None:
                 data["max_tokens"] = self.max_tokens
         return data
+
+    def _normalize_text_for_context(self, text, max_chars=500):
+        raw = str(text or "")
+        raw = re.sub(r"\s+", " ", raw).strip()
+        if len(raw) > max_chars:
+            raw = raw[:max_chars] + "... [truncated]"
+        return raw
+
+    def _content_to_text(self, content):
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    if item.get("type") == "text" and isinstance(item.get("text"), str):
+                        parts.append(item.get("text"))
+                    elif isinstance(item.get("content"), str):
+                        parts.append(item.get("content"))
+            return "\n".join([p for p in parts if p])
+        if isinstance(content, dict):
+            if isinstance(content.get("text"), str):
+                return content.get("text")
+            if isinstance(content.get("content"), str):
+                return content.get("content")
+            try:
+                return json.dumps(content, default=str)
+            except Exception:
+                return str(content)
+        return str(content)
+
+    def _estimate_messages_tokens(self, messages, prefix_text=""):
+        try:
+            enc = tiktoken.encoding_for_model(self.model)
+        except Exception:
+            enc = encoding
+        total = 4
+        if prefix_text:
+            try:
+                total += len(enc.encode(str(prefix_text)))
+            except Exception:
+                total += int(len(str(prefix_text)) / 4)
+        for msg in messages or []:
+            try:
+                total += 4
+                total += len(enc.encode(str((msg or {}).get("role") or "")))
+                total += len(enc.encode(self._content_to_text((msg or {}).get("content"))))
+            except Exception:
+                total += int(len(self._content_to_text((msg or {}).get("content"))) / 4) + 8
+        return total
+
+    def _extract_compaction_lists(self, messages):
+        state_summary = []
+        open_loops = []
+        decision_log = []
+        for msg in (messages or [])[-200:]:
+            role = str((msg or {}).get("role") or "unknown").strip().lower()
+            text = self._normalize_text_for_context(self._content_to_text((msg or {}).get("content")), max_chars=360)
+            if not text:
+                continue
+            if "[context_compaction_v1]" in text.lower():
+                continue
+            if role in {"user", "assistant"}:
+                state_summary.append(f"{role}: {text}")
+            lower = text.lower()
+            if "?" in text or "todo" in lower or "follow up" in lower or "next step" in lower:
+                open_loops.append(text)
+            if role == "assistant" and ("i will" in lower or "we will" in lower or "plan:" in lower or "next," in lower):
+                decision_log.append(text)
+        return (
+            state_summary[:24],
+            open_loops[:16],
+            decision_log[:16],
+        )
+
+    def _render_compaction_message(self, state_summary, open_loops, decision_log, removed_count):
+        lines = [
+            "[context_compaction_v1]",
+            f"compacted_messages: {int(removed_count)}",
+            "state_summary:",
+        ]
+        if state_summary:
+            lines.extend([f"- {x}" for x in state_summary[:16]])
+        else:
+            lines.append("- (none)")
+        lines.append("open_loops:")
+        if open_loops:
+            lines.extend([f"- {x}" for x in open_loops[:12]])
+        else:
+            lines.append("- (none)")
+        lines.append("decision_log:")
+        if decision_log:
+            lines.extend([f"- {x}" for x in decision_log[:12]])
+        else:
+            lines.append("- (none)")
+        lines.append("[/context_compaction_v1]")
+        return "\n".join(lines)
+
+    def _emit_compaction_event(self, meta):
+        if not self.event_listener:
+            return
+        try:
+            self.event_listener({
+                "type": "context_compaction",
+                "before_tokens": meta.get("before_tokens"),
+                "after_tokens": meta.get("after_tokens"),
+                "removed_messages": meta.get("removed_messages"),
+            })
+        except Exception:
+            pass
+
+    def _maybe_compact_messages(self, messages, additional_context=""):
+        if not self.enable_context_compaction:
+            return messages, None
+        if not isinstance(messages, list) or len(messages) < (self.context_compact_keep_recent + 2):
+            return messages, None
+        budget = int(self.context_budget_tokens or 0)
+        if budget <= 0:
+            return messages, None
+        threshold = max(1, int(budget * self.context_compact_threshold_ratio))
+        target = max(1, int(budget * self.context_compact_target_ratio))
+        if target >= threshold:
+            target = max(1, threshold - 1)
+
+        prefix = f"{self.instructions}\n{additional_context or ''}"
+        before_tokens = self._estimate_messages_tokens(messages, prefix_text=prefix)
+        if before_tokens <= threshold:
+            return messages, None
+
+        keep_recent = int(self.context_compact_keep_recent)
+        existing_summary = None
+        body = list(messages)
+        if (
+            body
+            and isinstance(body[0], dict)
+            and str(body[0].get("role") or "").lower() == "system"
+            and "[context_compaction_v1]" in str(body[0].get("content") or "")
+        ):
+            existing_summary = body[0]
+            body = body[1:]
+
+        sticky_system = []
+        compactable = []
+        for msg in body:
+            role = str((msg or {}).get("role") or "").lower()
+            content = str((msg or {}).get("content") or "")
+            if role == "system":
+                if "Tool outputs from most recent attempt" not in content and "[context_compaction_v1]" not in content:
+                    sticky_system.append(msg)
+                    continue
+            compactable.append(msg)
+
+        if len(compactable) <= keep_recent:
+            return messages, None
+
+        while keep_recent >= 6:
+            preserved = compactable[-keep_recent:]
+            removed = compactable[:-keep_recent]
+            pool = list(removed)
+            if existing_summary is not None:
+                pool = [existing_summary] + pool
+            state_summary, open_loops, decision_log = self._extract_compaction_lists(pool)
+            compact_msg = {
+                "role": "system",
+                "content": self._render_compaction_message(
+                    state_summary=state_summary,
+                    open_loops=open_loops,
+                    decision_log=decision_log,
+                    removed_count=len(removed),
+                ),
+                "timestamp": datetime.now().isoformat(),
+            }
+            candidate = sticky_system + [compact_msg] + preserved
+            after_tokens = self._estimate_messages_tokens(candidate, prefix_text=prefix)
+            if after_tokens <= target or keep_recent == 6:
+                meta = {
+                    "before_tokens": before_tokens,
+                    "after_tokens": after_tokens,
+                    "removed_messages": len(removed),
+                }
+                return candidate, meta
+            keep_recent = max(6, keep_recent - 4)
+
+        return messages, None
+
+    def _compact_tool_outputs_for_context(self, tool_outputs):
+        compacted = []
+        for output in (tool_outputs or []):
+            row = dict(output or {})
+            row["output"] = self._normalize_text_for_context(row.get("output"), max_chars=self.tool_output_context_max_chars)
+            compacted.append(row)
+        return compacted
     
     def _initialize_mcp_clients(self):
         """Initialize MCP client connections"""
@@ -650,7 +868,6 @@ class Assistant:
         if message_id is not None:
             msg["message_id"] = message_id
         thread["messages"].append(msg)
-        context = copy.deepcopy(thread["messages"][-self.max_messages:])
         
         #print(context)
         #print(self.thread_id)
@@ -664,6 +881,15 @@ class Assistant:
             additional_context = "\nInformation from the past that may be relevant: " + additional_context
         if self.has_file:
             additional_context += "Information from knowledge base: " + self.read_file(self.file_identifier, user_message, self.openai_client)
+        compacted_messages, compact_meta = self._maybe_compact_messages(thread["messages"], additional_context=additional_context)
+        if compact_meta:
+            thread["messages"] = compacted_messages
+            self._emit_compaction_event(compact_meta)
+            try:
+                self.put_thread(self.thread_id, thread["messages"])
+            except Exception:
+                pass
+        context = copy.deepcopy(thread["messages"][-self.max_messages:])
         tools = []
         if self.search_enabled:
             tools.append({
@@ -755,8 +981,9 @@ class Assistant:
                             self.event_listener(output)
                         if tool_call.function.name in self.async_tools:
                             async_tool_names.append(tool_call.function.name)
-                    data_['messages'] = data_['messages'] + [{"role": "system", "content": "Tool outputs from most recent attempt" + json.dumps(tool_outputs) + "\n If the above indicates an error, change the input and try again"}]
-                    thread["messages"].append({"role": "system", "content": "Tool outputs from most recent attempt: " + json.dumps(tool_outputs)})
+                    compact_outputs = self._compact_tool_outputs_for_context(tool_outputs)
+                    data_['messages'] = data_['messages'] + [{"role": "system", "content": "Tool outputs from most recent attempt" + json.dumps(compact_outputs) + "\n If the above indicates an error, change the input and try again"}]
+                    thread["messages"].append({"role": "system", "content": "Tool outputs from most recent attempt: " + json.dumps(compact_outputs)})
                     async_hint = self._async_tool_system_hint(async_tool_names)
                     if async_hint:
                         data_['messages'].append({"role": "system", "content": async_hint})
@@ -806,8 +1033,6 @@ class Assistant:
                 })
         timestamp = datetime.now().isoformat()
         thread["messages"].append({"role": "user", "content": content, "timestamp": timestamp})
-        if len(thread["messages"]) > self.max_messages:
-            thread["messages"] = thread["messages"][-self.max_messages:]
         try:
             self.put_thread(self.thread_id, thread["messages"])
         except Exception:
@@ -822,6 +1047,17 @@ class Assistant:
             additional_context = "\nInformation from the past that may be relevant: " + additional_context
         if self.has_file:
             additional_context += "Information from knowledge base: " + self.read_file(self.file_identifier, user_message, self.openai_client)
+        compacted_messages, compact_meta = self._maybe_compact_messages(thread["messages"], additional_context=additional_context)
+        if compact_meta:
+            thread["messages"] = compacted_messages
+            self._emit_compaction_event(compact_meta)
+        use_legacy_trim = not (self.enable_context_compaction and int(self.context_budget_tokens or 0) > 0)
+        if use_legacy_trim and len(thread["messages"]) > self.max_messages:
+            thread["messages"] = thread["messages"][-self.max_messages:]
+        try:
+            self.put_thread(self.thread_id, thread["messages"])
+        except Exception:
+            pass
         
         tools = []
         if self.search_enabled:
@@ -947,7 +1183,10 @@ class Assistant:
                                 "tool_arguments": tool_args
                             }
                         except Exception as e:
-                            print(f"Error executing tool: {e}")
+                            try:
+                                logger.exception("Error executing tool %s", tool_name)
+                            except Exception:
+                                pass
                             output = {
                                 "tool_call_id": call_id,
                                 "output": json.dumps({"error": str(e)}),
@@ -965,18 +1204,19 @@ class Assistant:
                             self.event_listener(output)
                         if tool_name in self.async_tools:
                             async_tool_names.append(tool_name)
+                    compact_outputs = self._compact_tool_outputs_for_context(tool_outputs)
 
                     data_['messages'] = data_['messages'] + [
                         {"role": "assistant", "content": None, "tool_calls": assistant_tool_calls}
                     ]
-                    for output in tool_outputs:
+                    for output in compact_outputs:
                         data_['messages'].append({
                             "role": "tool",
                             "tool_call_id": output["tool_call_id"],
                             "content": output["output"]
                         })
                     try:
-                        thread["messages"].append({"role": "system", "content": "Tool outputs from most recent attempt: " + json.dumps(tool_outputs)})
+                        thread["messages"].append({"role": "system", "content": "Tool outputs from most recent attempt: " + json.dumps(compact_outputs)})
                         self.put_thread(self.thread_id, thread["messages"])
                     except Exception:
                         pass
@@ -1008,8 +1248,16 @@ class Assistant:
                         kwargs={'model': self.embedding_model}).start()
             return result
         except Exception as e:
-            print(e)
-            return "Error "+str(e)
+            # NOTE: This is a streaming generator; returning a string here results in an empty
+            # stream for callers (StopIteration.value is ignored). Yield a short, safe error
+            # so the UI never looks "stuck", while logging the full traceback server-side.
+            try:
+                logger.exception("Assistant streaming failure (old_mode)")
+            except Exception:
+                pass
+            err = f"Internal error while generating response: {type(e).__name__}: {str(e)[:500]}"
+            yield err
+            return
     def delete_message_assistant(self, message_id):
         self.openai_client.beta.threads.messages.delete(thread_id=self.thread.id, message_id=message_id)
         return "Message deleted"
