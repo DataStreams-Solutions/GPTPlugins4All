@@ -12,6 +12,7 @@ import copy
 from datetime import datetime
 import logging
 import re
+from urllib.parse import urlparse
 
 load_dotenv()
 
@@ -278,6 +279,8 @@ class Assistant:
         self.other_tools = other_tools or []
         self.other_functions = other_functions or {}
         self.initial_suggestions = initial_suggestions
+        self.chat_base_url = str(base_url or "").strip()
+        self._chat_disallow_system_role = self._should_disallow_system_role(self.chat_base_url)
         suggestions_str = ''
         if initial_suggestions is not None:
             suggestions_str = json.dumps(initial_suggestions)
@@ -383,6 +386,85 @@ class Assistant:
             if self.max_tokens is not None:
                 data["max_tokens"] = self.max_tokens
         return data
+
+    def _should_disallow_system_role(self, base_url):
+        try:
+            host = (urlparse(str(base_url or "")).netloc or "").lower()
+        except Exception:
+            host = ""
+        return "minimaxi.chat" in host
+
+    def _system_prompt_as_user_content(self, content):
+        text = self._content_to_text(content).strip()
+        if not text:
+            text = "(empty)"
+        if text.startswith("[SYSTEM CONTEXT]"):
+            return text
+        return "[SYSTEM CONTEXT]\n" + text
+
+    def _normalize_outbound_message(self, msg):
+        if not isinstance(msg, dict):
+            return None
+
+        role = str(msg.get("role") or "").strip().lower()
+        if role == "system":
+            if self._chat_disallow_system_role:
+                return {
+                    "role": "user",
+                    "content": self._system_prompt_as_user_content(msg.get("content")),
+                }
+            return {
+                "role": "system",
+                "content": self._content_to_text(msg.get("content")),
+            }
+
+        if role == "user":
+            content = msg.get("content")
+            if content is None:
+                content = ""
+            return {"role": "user", "content": content}
+
+        if role == "assistant":
+            normalized = {"role": "assistant"}
+            if msg.get("tool_calls") is not None:
+                normalized["tool_calls"] = msg.get("tool_calls")
+                normalized["content"] = msg.get("content")
+            else:
+                normalized["content"] = msg.get("content") if msg.get("content") is not None else ""
+            return normalized
+
+        if role == "tool":
+            normalized = {
+                "role": "tool",
+                "tool_call_id": msg.get("tool_call_id"),
+                "content": msg.get("content") if msg.get("content") is not None else "",
+            }
+            if msg.get("name"):
+                normalized["name"] = msg.get("name")
+            return normalized
+
+        fallback_content = self._content_to_text(msg.get("content"))
+        return {"role": "user", "content": fallback_content}
+
+    def _prepare_chat_payload(self, data):
+        payload = copy.deepcopy(data or {})
+        payload_messages = payload.get("messages") or []
+        sanitized_messages = []
+        for msg in payload_messages:
+            normalized = self._normalize_outbound_message(msg)
+            if normalized is None:
+                continue
+            if normalized.get("role") == "tool" and not normalized.get("tool_call_id"):
+                continue
+            sanitized_messages.append(normalized)
+        payload["messages"] = sanitized_messages
+
+        if not payload.get("tools"):
+            payload.pop("tools", None)
+            payload.pop("tool_choice", None)
+        elif payload.get("tool_choice") is None:
+            payload.pop("tool_choice", None)
+        return payload
 
     def _normalize_text_for_context(self, text, max_chars=500):
         raw = str(text or "")
@@ -1099,7 +1181,7 @@ class Assistant:
             }
             data_ = self._build_chat_data(base_data)
         try:
-            completion = self.openai_client.chat.completions.create(**data_)
+            completion = self.openai_client.chat.completions.create(**self._prepare_chat_payload(data_))
             print(self.configs)
             if self.raw_mode == False:
                 while completion.choices[0].message.role == "assistant" and completion.choices[0].message.tool_calls:
@@ -1125,7 +1207,7 @@ class Assistant:
                     if async_hint:
                         data_['messages'].append({"role": "system", "content": async_hint})
 
-                    completion = self.openai_client.chat.completions.create(**data_)
+                    completion = self.openai_client.chat.completions.create(**self._prepare_chat_payload(data_))
             print(completion.choices[0].message)
             raw_response_message = self._content_to_text(completion.choices[0].message.content)
             response_message, think_reasoning = self._strip_think_blocks(raw_response_message)
@@ -1261,7 +1343,7 @@ class Assistant:
             while not done:
                 if self.stop_check and self.stop_check():
                     return
-                completion = self.openai_client.chat.completions.create(**data_)
+                completion = self.openai_client.chat.completions.create(**self._prepare_chat_payload(data_))
 
                 result = ""
                 raw_result = ""
