@@ -235,7 +235,7 @@ def generate_function_name(api_call):
     return function_name
 
 class Assistant:
-    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None, suggest_responses=False, api_calls=[], sources=None, initial_suggestions=None, mcp_servers=None, emit_tool_preamble=True, stop_check=None, async_tools=None, chat_completion_defaults=None, enable_context_compaction=False, context_budget_tokens=None, context_compact_threshold_ratio=0.82, context_compact_target_ratio=0.58, context_compact_keep_recent=18, tool_output_context_max_chars=1200):
+    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None, suggest_responses=False, api_calls=[], sources=None, initial_suggestions=None, mcp_servers=None, emit_tool_preamble=True, stop_check=None, async_tools=None, chat_completion_defaults=None, enable_context_compaction=False, context_budget_tokens=None, context_compact_threshold_ratio=0.82, context_compact_target_ratio=0.58, context_compact_keep_recent=18, tool_output_context_max_chars=1200, embedding_base_url=None):
         try:
             from openai import OpenAI
         except ImportError:
@@ -302,19 +302,23 @@ class Assistant:
             embedding_key = None
         if isinstance(base_url, str) and not base_url.strip():
             base_url = None
+        if isinstance(embedding_base_url, str) and not embedding_base_url.strip():
+            embedding_base_url = None
+        if embedding_base_url is None:
+            embedding_base_url = os.getenv("OPENAI_EMBEDDING_BASE_URL", "https://api.openai.com/v1")
 
         if openai_key is None:
             if base_url is None or base_url == '' or base_url == 'https://api.openai.com':
                 self.openai_client = OpenAI()
             else:
                 self.openai_client = OpenAI(base_url=base_url)
-                self.embedding_client = OpenAI(api_key=embedding_key)
+                self.embedding_client = OpenAI(api_key=embedding_key, base_url=embedding_base_url)
         else:
             if base_url is None or base_url == '' or base_url == 'https://api.openai.com':
                 self.openai_client = OpenAI(api_key=openai_key)
             else:
                 self.openai_client = OpenAI(api_key=openai_key, base_url=base_url)
-                self.embedding_client = OpenAI(api_key=embedding_key)
+                self.embedding_client = OpenAI(api_key=embedding_key, base_url=embedding_base_url)
         if old_mode:
             self.assistant = None
             self.thread = None
