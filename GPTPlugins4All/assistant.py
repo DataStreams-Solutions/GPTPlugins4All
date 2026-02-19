@@ -884,7 +884,8 @@ class Assistant:
         if additional_context is not None:
             additional_context = "\nInformation from the past that may be relevant: " + additional_context
         if self.has_file:
-            additional_context += "Information from knowledge base: " + self.read_file(self.file_identifier, user_message, self.openai_client)
+            kb_client = self.embedding_client or self.openai_client
+            additional_context += "Information from knowledge base: " + self.read_file(self.file_identifier, user_message, kb_client)
         compacted_messages, compact_meta = self._maybe_compact_messages(thread["messages"], additional_context=additional_context)
         if compact_meta:
             thread["messages"] = compacted_messages
@@ -1050,7 +1051,8 @@ class Assistant:
         if additional_context is not None:
             additional_context = "\nInformation from the past that may be relevant: " + additional_context
         if self.has_file:
-            additional_context += "Information from knowledge base: " + self.read_file(self.file_identifier, user_message, self.openai_client)
+            kb_client = self.embedding_client or self.openai_client
+            additional_context += "Information from knowledge base: " + self.read_file(self.file_identifier, user_message, kb_client)
         compacted_messages, compact_meta = self._maybe_compact_messages(thread["messages"], additional_context=additional_context)
         if compact_meta:
             thread["messages"] = compacted_messages
