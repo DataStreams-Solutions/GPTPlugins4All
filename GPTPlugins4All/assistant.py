@@ -391,6 +391,138 @@ class Assistant:
             raw = raw[:max_chars] + "... [truncated]"
         return raw
 
+    def _coerce_reasoning_text(self, value):
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            parts = [self._coerce_reasoning_text(v) for v in value]
+            return "\n".join([p for p in parts if p]).strip()
+        if isinstance(value, dict):
+            for key in ("text", "content", "reasoning"):
+                v = value.get(key)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            try:
+                return json.dumps(value, default=str)
+            except Exception:
+                return str(value).strip()
+        return str(value).strip()
+
+    def _extract_reasoning_from_obj(self, obj):
+        if obj is None:
+            return ""
+        parts = []
+        for attr in ("reasoning", "reasoning_content", "reasoning_text"):
+            try:
+                value = getattr(obj, attr, None)
+            except Exception:
+                value = None
+            text = self._coerce_reasoning_text(value)
+            if text:
+                parts.append(text)
+        try:
+            details = getattr(obj, "reasoning_details", None)
+        except Exception:
+            details = None
+        details_text = self._coerce_reasoning_text(details)
+        if details_text:
+            parts.append(details_text)
+        merged = "\n".join([p for p in parts if p]).strip()
+        return merged
+
+    def _strip_think_blocks(self, text):
+        raw = str(text or "")
+        if not raw:
+            return "", ""
+        pattern = re.compile(r"<think>(.*?)</think>", re.IGNORECASE | re.DOTALL)
+        extracted = []
+
+        def _capture(match):
+            body = (match.group(1) or "").strip()
+            if body:
+                extracted.append(body)
+            return ""
+
+        cleaned = pattern.sub(_capture, raw)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        reasoning = "\n\n".join([x for x in extracted if x]).strip()
+        return cleaned, reasoning
+
+    def _merge_reasoning_text(self, *parts):
+        merged = []
+        seen = set()
+        for part in parts:
+            txt = self._coerce_reasoning_text(part)
+            if not txt:
+                continue
+            key = txt.strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            merged.append(key)
+        return "\n\n".join(merged).strip()
+
+    def _emit_reasoning_event(self, reasoning_text):
+        txt = self._coerce_reasoning_text(reasoning_text)
+        if not txt or not self.event_listener:
+            return
+        try:
+            self.event_listener({"type": "assistant_reasoning", "content": txt})
+        except Exception:
+            pass
+
+    def _consume_stream_think_chunk(self, chunk, state):
+        text = str(chunk or "")
+        if not text:
+            return "", ""
+        pending = str(state.get("pending") or "") + text
+        in_think = bool(state.get("in_think"))
+        visible_out = []
+        reasoning_out = []
+
+        while True:
+            if in_think:
+                end_idx = pending.find("</think>")
+                if end_idx >= 0:
+                    reasoning_out.append(pending[:end_idx])
+                    pending = pending[end_idx + len("</think>"):]
+                    in_think = False
+                    continue
+                safe_len = max(0, len(pending) - (len("</think>") - 1))
+                if safe_len > 0:
+                    reasoning_out.append(pending[:safe_len])
+                    pending = pending[safe_len:]
+                break
+            else:
+                start_idx = pending.find("<think>")
+                if start_idx >= 0:
+                    visible_out.append(pending[:start_idx])
+                    pending = pending[start_idx + len("<think>"):]
+                    in_think = True
+                    continue
+                safe_len = max(0, len(pending) - (len("<think>") - 1))
+                if safe_len > 0:
+                    visible_out.append(pending[:safe_len])
+                    pending = pending[safe_len:]
+                break
+
+        state["pending"] = pending
+        state["in_think"] = in_think
+        return "".join(visible_out), "".join(reasoning_out)
+
+    def _flush_stream_think_state(self, state):
+        pending = str(state.get("pending") or "")
+        in_think = bool(state.get("in_think"))
+        state["pending"] = ""
+        state["in_think"] = False
+        if not pending:
+            return "", ""
+        if in_think:
+            return "", pending
+        return pending, ""
+
     def _content_to_text(self, content):
         if content is None:
             return ""
@@ -995,9 +1127,16 @@ class Assistant:
 
                     completion = self.openai_client.chat.completions.create(**data_)
             print(completion.choices[0].message)
-            response_message = completion.choices[0].message.content
+            raw_response_message = self._content_to_text(completion.choices[0].message.content)
+            response_message, think_reasoning = self._strip_think_blocks(raw_response_message)
+            direct_reasoning = self._extract_reasoning_from_obj(completion.choices[0].message)
+            combined_reasoning = self._merge_reasoning_text(direct_reasoning, think_reasoning)
             print(response_message)
-            thread["messages"].append({"role": "assistant", "content": response_message})
+            assistant_row = {"role": "assistant", "content": response_message}
+            if combined_reasoning:
+                assistant_row["reasoning"] = combined_reasoning
+                self._emit_reasoning_event(combined_reasoning)
+            thread["messages"].append(assistant_row)
             self.put_thread(self.thread_id, thread["messages"])
             if self.save_memory is not None:
                 if self.embedding_model is None:
@@ -1125,6 +1264,9 @@ class Assistant:
                 completion = self.openai_client.chat.completions.create(**data_)
 
                 result = ""
+                raw_result = ""
+                think_stream_state = {"pending": "", "in_think": False}
+                reasoning_chunks = []
                 tool_calls = {}
                 tool_call_ids_by_index = {}
                 finish_reason = None
@@ -1134,9 +1276,17 @@ class Assistant:
                         return
                     delta = response_chunk.choices[0].delta
                     finish_reason = response_chunk.choices[0].finish_reason or finish_reason
+                    delta_reasoning = self._extract_reasoning_from_obj(delta)
+                    if delta_reasoning:
+                        reasoning_chunks.append(delta_reasoning)
                     if delta.content is not None:
-                        result += delta.content
-                        yield delta.content
+                        raw_result += delta.content
+                        visible_chunk, reasoning_chunk = self._consume_stream_think_chunk(delta.content, think_stream_state)
+                        if reasoning_chunk:
+                            reasoning_chunks.append(reasoning_chunk)
+                        if visible_chunk:
+                            result += visible_chunk
+                            yield visible_chunk
 
                     if delta.tool_calls:
                         for tool_call in delta.tool_calls:
@@ -1233,8 +1383,25 @@ class Assistant:
                     continue
 
                 done = True
-                
-            thread["messages"].append({"role": "assistant", "content": result})
+
+                tail_visible, tail_reasoning = self._flush_stream_think_state(think_stream_state)
+                if tail_reasoning:
+                    reasoning_chunks.append(tail_reasoning)
+                if tail_visible:
+                    result += tail_visible
+                    yield tail_visible
+
+            cleaned_result, think_reasoning = self._strip_think_blocks(raw_result or result)
+            if cleaned_result:
+                result = cleaned_result
+            combined_reasoning = self._merge_reasoning_text("\n\n".join(reasoning_chunks), think_reasoning)
+
+            assistant_row = {"role": "assistant", "content": result}
+            if combined_reasoning:
+                assistant_row["reasoning"] = combined_reasoning
+                self._emit_reasoning_event(combined_reasoning)
+
+            thread["messages"].append(assistant_row)
             #self.put_thread(self.thread_id, thread["messages"])
             threading.Thread(target=self.put_thread, args=(self.thread_id, thread["messages"])).start()
             if self.save_memory is not None:
