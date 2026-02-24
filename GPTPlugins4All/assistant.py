@@ -793,6 +793,226 @@ class Assistant:
             row["output"] = self._normalize_text_for_context(row.get("output"), max_chars=self.tool_output_context_max_chars)
             compacted.append(row)
         return compacted
+
+    def _is_openrouter_base_url(self):
+        try:
+            host = (urlparse(str(self.chat_base_url or "")).netloc or "").lower()
+        except Exception:
+            host = ""
+        return "openrouter.ai" in host
+
+    def _safe_int_env(self, name, default):
+        try:
+            return int(str(os.getenv(name, str(default))).strip())
+        except Exception:
+            return int(default)
+
+    def _context_limit_tokens(self):
+        explicit = self._safe_int_env("ASSISTANT_CONTEXT_LIMIT_TOKENS", 0)
+        if explicit > 0:
+            return explicit
+        if self._is_openrouter_base_url():
+            return self._safe_int_env("ASSISTANT_OPENROUTER_CONTEXT_LIMIT_TOKENS", 204800)
+        return 0
+
+    def _min_output_tokens_floor(self):
+        return max(256, self._safe_int_env("ASSISTANT_MIN_COMPLETION_TOKENS", 60000))
+
+    def _context_retry_margin_tokens(self):
+        return max(64, self._safe_int_env("ASSISTANT_CONTEXT_RETRY_MARGIN_TOKENS", 512))
+
+    def _context_error_max_retries(self):
+        return max(1, self._safe_int_env("ASSISTANT_CONTEXT_ERROR_MAX_RETRIES", 4))
+
+    def _is_context_length_error(self, err_text):
+        raw = str(err_text or "").lower()
+        return ("context length" in raw and "token" in raw) or ("maximum context length" in raw)
+
+    def _extract_context_error_meta(self, err_text):
+        raw = str(err_text or "")
+        if not raw:
+            return None
+
+        detailed = re.search(
+            r"maximum context length is\s*([\d,]+)\s*tokens.*?requested about\s*([\d,]+)\s*tokens\s*\(\s*([\d,]+)\s*of text input,\s*([\d,]+)\s*of tool input,\s*([\d,]+)\s*in the output\s*\)",
+            raw,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if detailed:
+            limit = int(detailed.group(1).replace(",", ""))
+            requested = int(detailed.group(2).replace(",", ""))
+            text_input = int(detailed.group(3).replace(",", ""))
+            tool_input = int(detailed.group(4).replace(",", ""))
+            output = int(detailed.group(5).replace(",", ""))
+            return {
+                "context_limit": limit,
+                "requested_tokens": requested,
+                "text_input_tokens": text_input,
+                "tool_input_tokens": tool_input,
+                "input_tokens": text_input + tool_input,
+                "output_tokens": output,
+            }
+
+        generic = re.search(
+            r"maximum context length is\s*([\d,]+)\s*tokens.*?requested about\s*([\d,]+)\s*tokens",
+            raw,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if generic:
+            return {
+                "context_limit": int(generic.group(1).replace(",", "")),
+                "requested_tokens": int(generic.group(2).replace(",", "")),
+            }
+        return None
+
+    def _estimate_payload_input_tokens(self, payload):
+        data = payload or {}
+        msg_tokens = self._estimate_messages_tokens(data.get("messages") or [])
+        tools_tokens = 0
+        tools = data.get("tools") or []
+        if tools:
+            try:
+                enc = tiktoken.encoding_for_model(self.model)
+            except Exception:
+                enc = encoding
+            try:
+                tools_tokens = len(enc.encode(json.dumps(tools, default=str)))
+            except Exception:
+                tools_tokens = int(len(str(tools)) / 4)
+        return int(msg_tokens + tools_tokens + 32)
+
+    def _apply_proactive_output_cap(self, payload):
+        if "gpt-5" not in str(self.model or "").lower():
+            return False
+        if not isinstance(payload, dict):
+            return False
+        requested = payload.get("max_completion_tokens")
+        try:
+            requested = int(requested)
+        except Exception:
+            return False
+        if requested <= 0:
+            return False
+
+        context_limit = self._context_limit_tokens()
+        if context_limit <= 0:
+            return False
+
+        floor = self._min_output_tokens_floor()
+        if requested <= floor:
+            return False
+
+        est_input = self._estimate_payload_input_tokens(payload)
+        allowed = context_limit - est_input - self._context_retry_margin_tokens()
+        if allowed <= 0:
+            return False
+        allowed = int(allowed)
+        if allowed >= requested:
+            return False
+        if allowed < floor:
+            return False
+
+        payload["max_completion_tokens"] = allowed
+        return True
+
+    def _force_compact_payload_messages(self, payload):
+        if not isinstance(payload, dict):
+            return False
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            return False
+
+        # Keep the first message if it's system prompt/instructions.
+        prefix = []
+        body = list(messages)
+        if body and isinstance(body[0], dict) and str(body[0].get("role") or "").lower() == "system":
+            prefix = [body[0]]
+            body = body[1:]
+
+        keep_recent = max(6, min(int(self.context_compact_keep_recent or 18), 12))
+        if len(body) <= keep_recent:
+            return False
+
+        removed = body[:-keep_recent]
+        preserved = body[-keep_recent:]
+        state_summary, open_loops, decision_log = self._extract_compaction_lists(removed)
+        compact_msg = {
+            "role": "system",
+            "content": self._render_compaction_message(
+                state_summary=state_summary,
+                open_loops=open_loops,
+                decision_log=decision_log,
+                removed_count=len(removed),
+            ),
+            "timestamp": datetime.now().isoformat(),
+        }
+        payload["messages"] = prefix + [compact_msg] + preserved
+        return True
+
+    def _attempt_context_error_recovery(self, payload, err_text):
+        if not isinstance(payload, dict):
+            return False
+
+        floor = self._min_output_tokens_floor()
+        current_max = payload.get("max_completion_tokens")
+        try:
+            current_max = int(current_max)
+        except Exception:
+            current_max = None
+
+        meta = self._extract_context_error_meta(err_text)
+        margin = self._context_retry_margin_tokens()
+
+        if current_max is not None and current_max > floor:
+            proposed = None
+            if meta and meta.get("context_limit") and meta.get("input_tokens") is not None:
+                allowed = int(meta["context_limit"]) - int(meta["input_tokens"]) - int(margin)
+                if allowed > 0:
+                    proposed = allowed
+            if proposed is None:
+                step = max(1000, int(current_max * 0.08))
+                proposed = current_max - step
+            proposed = max(floor, int(proposed))
+            if proposed < current_max:
+                payload["max_completion_tokens"] = proposed
+                return True
+
+        if self.enable_context_compaction:
+            if self._force_compact_payload_messages(payload):
+                return True
+
+        # OpenRouter supports prompt transforms; apply as a final retry lever.
+        if self._is_openrouter_base_url():
+            extra_body = dict(payload.get("extra_body") or {})
+            transforms = extra_body.get("transforms")
+            if not transforms:
+                extra_body["transforms"] = ["middle-out"]
+                payload["extra_body"] = extra_body
+                return True
+
+        return False
+
+    def _chat_completion_create_with_context_recovery(self, payload):
+        attempts = self._context_error_max_retries()
+        if not isinstance(payload, dict):
+            payload = {}
+        self._apply_proactive_output_cap(payload)
+
+        last_error = None
+        for _ in range(attempts):
+            try:
+                return self.openai_client.chat.completions.create(**self._prepare_chat_payload(payload))
+            except Exception as e:
+                last_error = e
+                err_text = str(e or "")
+                if not self._is_context_length_error(err_text):
+                    raise
+                if not self._attempt_context_error_recovery(payload, err_text):
+                    raise
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("chat completion failed without a concrete exception")
     
     def _initialize_mcp_clients(self):
         """Initialize MCP client connections"""
@@ -1181,7 +1401,7 @@ class Assistant:
             }
             data_ = self._build_chat_data(base_data)
         try:
-            completion = self.openai_client.chat.completions.create(**self._prepare_chat_payload(data_))
+            completion = self._chat_completion_create_with_context_recovery(data_)
             print(self.configs)
             if self.raw_mode == False:
                 while completion.choices[0].message.role == "assistant" and completion.choices[0].message.tool_calls:
@@ -1207,7 +1427,7 @@ class Assistant:
                     if async_hint:
                         data_['messages'].append({"role": "system", "content": async_hint})
 
-                    completion = self.openai_client.chat.completions.create(**self._prepare_chat_payload(data_))
+                    completion = self._chat_completion_create_with_context_recovery(data_)
             print(completion.choices[0].message)
             raw_response_message = self._content_to_text(completion.choices[0].message.content)
             response_message, think_reasoning = self._strip_think_blocks(raw_response_message)
@@ -1343,7 +1563,7 @@ class Assistant:
             while not done:
                 if self.stop_check and self.stop_check():
                     return
-                completion = self.openai_client.chat.completions.create(**self._prepare_chat_payload(data_))
+                completion = self._chat_completion_create_with_context_recovery(data_)
 
                 result = ""
                 raw_result = ""
