@@ -236,7 +236,7 @@ def generate_function_name(api_call):
     return function_name
 
 class Assistant:
-    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None, suggest_responses=False, api_calls=[], sources=None, initial_suggestions=None, mcp_servers=None, emit_tool_preamble=True, stop_check=None, async_tools=None, chat_completion_defaults=None, enable_context_compaction=False, context_budget_tokens=None, context_compact_threshold_ratio=0.82, context_compact_target_ratio=0.58, context_compact_keep_recent=18, tool_output_context_max_chars=1200, embedding_base_url=None):
+    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None, suggest_responses=False, api_calls=[], sources=None, initial_suggestions=None, mcp_servers=None, emit_tool_preamble=True, stop_check=None, async_tools=None, chat_completion_defaults=None, enable_context_compaction=False, context_budget_tokens=None, context_compact_threshold_ratio=0.82, context_compact_target_ratio=0.58, context_compact_keep_recent=18, tool_output_context_max_chars=1200, embedding_base_url=None, resolve_image_url=None):
         try:
             from openai import OpenAI
         except ImportError:
@@ -270,6 +270,7 @@ class Assistant:
         self.stop_check = stop_check
         self.async_tools = async_tools or []
         self.chat_completion_defaults = copy.deepcopy(chat_completion_defaults or {})
+        self.resolve_image_url = resolve_image_url
         self.enable_context_compaction = bool(enable_context_compaction)
         self.context_budget_tokens = int(context_budget_tokens or 0) if str(context_budget_tokens or "").strip() else 0
         self.context_compact_threshold_ratio = float(context_compact_threshold_ratio or 0.82)
@@ -422,15 +423,18 @@ class Assistant:
             content = msg.get("content")
             if content is None:
                 content = ""
+            content = self._resolve_content_image_urls(content)
             return {"role": "user", "content": content}
 
         if role == "assistant":
             normalized = {"role": "assistant"}
             if msg.get("tool_calls") is not None:
                 normalized["tool_calls"] = msg.get("tool_calls")
-                normalized["content"] = msg.get("content")
+                normalized["content"] = self._resolve_content_image_urls(msg.get("content"))
             else:
-                normalized["content"] = msg.get("content") if msg.get("content") is not None else ""
+                normalized["content"] = self._resolve_content_image_urls(
+                    msg.get("content") if msg.get("content") is not None else ""
+                )
             return normalized
 
         if role == "tool":
@@ -631,6 +635,66 @@ class Assistant:
             except Exception:
                 return str(content)
         return str(content)
+
+    def _resolve_image_url_value(self, url, source_url=None):
+        candidate = str(source_url or url or "").strip()
+        if not candidate:
+            return str(url or "").strip()
+        resolver = self.resolve_image_url
+        if callable(resolver):
+            try:
+                resolved = resolver(candidate)
+                resolved_str = str(resolved or "").strip()
+                if resolved_str:
+                    return resolved_str
+            except Exception:
+                pass
+        return str(url or candidate).strip()
+
+    def _normalize_image_input(self, image_input):
+        if isinstance(image_input, dict):
+            source_url = str(
+                image_input.get("source_url")
+                or image_input.get("s3_uri")
+                or image_input.get("agent_image_path")
+                or image_input.get("public_url")
+                or image_input.get("url")
+                or image_input.get("image_url")
+                or ""
+            ).strip()
+            display_url = str(
+                image_input.get("url")
+                or image_input.get("access_url")
+                or image_input.get("image_url")
+                or source_url
+                or ""
+            ).strip()
+            return display_url, source_url
+        raw = str(image_input or "").strip()
+        return raw, raw
+
+    def _resolve_content_image_urls(self, content):
+        if isinstance(content, list):
+            out = []
+            for part in content:
+                if not isinstance(part, dict):
+                    out.append(part)
+                    continue
+                next_part = dict(part)
+                if str(next_part.get("type") or "").strip().lower() == "image_url":
+                    image_url = next_part.get("image_url")
+                    if isinstance(image_url, dict):
+                        image_payload = dict(image_url)
+                        original_url = str(image_payload.get("url") or "").strip()
+                        source_url = str(next_part.get("source_url") or "").strip()
+                        resolved_url = self._resolve_image_url_value(original_url, source_url=source_url)
+                        if resolved_url:
+                            image_payload["url"] = resolved_url
+                        next_part["image_url"] = image_payload
+                    next_part.pop("source_url", None)
+                out.append(next_part)
+            return out
+        return content
 
     def _estimate_messages_tokens(self, messages, prefix_text=""):
         try:
@@ -1292,16 +1356,20 @@ class Assistant:
         
         content = user_message
         if image_paths is not None and image_paths != []:
+            content = [{"type": "text", "text": user_message}]
             for image_path in image_paths:
-                #base64_image = encode_image(image_path)
-                print(image_path)
-                content = [{"type": "text", "text": user_message}]
-                content.append({
+                display_url, source_url = self._normalize_image_input(image_path)
+                if not display_url:
+                    continue
+                image_part = {
                     "type": "image_url",
                     "image_url": {
-                        "url": image_path
+                        "url": display_url
                     }
-                })
+                }
+                if source_url and source_url != display_url:
+                    image_part["source_url"] = source_url
+                content.append(image_part)
         msg = {"role": "user", "content": content, "timestamp": datetime.now().isoformat()}
         if message_id is not None:
             msg["message_id"] = message_id
@@ -1471,12 +1539,18 @@ class Assistant:
         content = [{"type": "text", "text": user_message}]
         if image_paths is not None:
             for image_path in image_paths:
-                content.append({
+                display_url, source_url = self._normalize_image_input(image_path)
+                if not display_url:
+                    continue
+                image_part = {
                     "type": "image_url",
                     "image_url": {
-                        "url": image_path
+                        "url": display_url
                     }
-                })
+                }
+                if source_url and source_url != display_url:
+                    image_part["source_url"] = source_url
+                content.append(image_part)
         timestamp = datetime.now().isoformat()
         thread["messages"].append({"role": "user", "content": content, "timestamp": timestamp})
         try:
@@ -1752,13 +1826,18 @@ class Assistant:
         content = [{"type": "text", "text": message}]
         if image_paths is not None:
             for image_path in image_paths:
-                #base64_image = encode_image(image_path)
-                content.append({
+                display_url, source_url = self._normalize_image_input(image_path)
+                if not display_url:
+                    continue
+                image_part = {
                     "type": "image_url",
                     "image_url": {
-                        "url": image_path
+                        "url": display_url
                     }
-                })
+                }
+                if source_url and source_url != display_url:
+                    image_part["source_url"] = source_url
+                content.append(image_part)
         
         message_obj = self.openai_client.beta.threads.messages.create(
             thread_id=self.thread.id,
