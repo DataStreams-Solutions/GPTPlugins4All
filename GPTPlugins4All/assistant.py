@@ -818,6 +818,81 @@ class Assistant:
                 pass
         return str(url or candidate).strip()
 
+    def _extract_tool_generated_image_urls(self, tool_outputs):
+        urls = []
+        seen = set()
+
+        def _add(candidate):
+            raw = str(candidate or "").strip()
+            if not raw:
+                return
+            resolved = self._resolve_image_url_value(raw, raw)
+            resolved = str(resolved or "").strip()
+            if not resolved:
+                return
+            low = resolved.lower()
+            if not (low.startswith("https://") or low.startswith("http://")):
+                return
+            if resolved in seen:
+                return
+            seen.add(resolved)
+            urls.append(resolved)
+
+        for row in tool_outputs or []:
+            payload = row.get("output") if isinstance(row, dict) else None
+            parsed = None
+            if isinstance(payload, dict):
+                parsed = payload
+            elif isinstance(payload, str):
+                try:
+                    parsed = json.loads(payload)
+                except Exception:
+                    parsed = None
+            if not isinstance(parsed, dict):
+                continue
+
+            generated = parsed.get("generated_image_urls")
+            if isinstance(generated, list):
+                for item in generated:
+                    _add(item)
+
+            artifact = parsed.get("workspace_artifact")
+            if isinstance(artifact, dict):
+                _add(artifact.get("model_image_url"))
+                _add(artifact.get("image_url"))
+                storage = artifact.get("storage")
+                if isinstance(storage, dict):
+                    _add(storage.get("uri"))
+                    _add(storage.get("path"))
+
+            artifacts = parsed.get("workspace_artifacts")
+            if isinstance(artifacts, list):
+                for item in artifacts:
+                    if not isinstance(item, dict):
+                        continue
+                    _add(item.get("model_image_url"))
+                    _add(item.get("image_url"))
+                    storage = item.get("storage")
+                    if isinstance(storage, dict):
+                        _add(storage.get("uri"))
+                        _add(storage.get("path"))
+
+        return urls[:4]
+
+    def _tool_image_context_message(self, image_urls):
+        rows = [str(url or "").strip() for url in (image_urls or []) if str(url or "").strip()]
+        if not rows:
+            return None
+        content = [
+            {
+                "type": "text",
+                "text": "Connector-generated image(s) from the latest tool call. Use these for visual analysis and iteration if helpful.",
+            }
+        ]
+        for url in rows[:4]:
+            content.append({"type": "image_url", "image_url": {"url": url}})
+        return {"role": "user", "content": content}
+
     def _normalize_image_input(self, image_input):
         if isinstance(image_input, dict):
             source_url = str(
@@ -1656,8 +1731,12 @@ class Assistant:
                         if tool_call.function.name in self.async_tools:
                             async_tool_names.append(tool_call.function.name)
                     compact_outputs = self._compact_tool_outputs_for_context(tool_outputs)
+                    tool_image_urls = self._extract_tool_generated_image_urls(tool_outputs)
                     data_['messages'] = data_['messages'] + [{"role": "system", "content": "Tool outputs from most recent attempt" + self._json_dumps_safe(compact_outputs) + "\n If the above indicates an error, change the input and try again"}]
                     thread["messages"].append({"role": "system", "content": "Tool outputs from most recent attempt: " + self._json_dumps_safe(compact_outputs)})
+                    image_msg = self._tool_image_context_message(tool_image_urls)
+                    if image_msg:
+                        data_["messages"].append(image_msg)
                     async_hint = self._async_tool_system_hint(async_tool_names)
                     if async_hint:
                         data_['messages'].append({"role": "system", "content": async_hint})
@@ -1904,6 +1983,7 @@ class Assistant:
                         if tool_name in self.async_tools:
                             async_tool_names.append(tool_name)
                     compact_outputs = self._compact_tool_outputs_for_context(tool_outputs)
+                    tool_image_urls = self._extract_tool_generated_image_urls(tool_outputs)
 
                     data_['messages'] = data_['messages'] + [
                         {"role": "assistant", "content": None, "tool_calls": assistant_tool_calls}
@@ -1919,6 +1999,9 @@ class Assistant:
                         self.put_thread(self.thread_id, thread["messages"])
                     except Exception:
                         pass
+                    image_msg = self._tool_image_context_message(tool_image_urls)
+                    if image_msg:
+                        data_["messages"].append(image_msg)
                     async_hint = self._async_tool_system_hint(async_tool_names)
                     if async_hint:
                         data_['messages'].append({"role": "system", "content": async_hint})
