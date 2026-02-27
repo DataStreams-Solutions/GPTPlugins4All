@@ -442,7 +442,7 @@ class Assistant:
         self._chat_disallow_system_role = self._should_disallow_system_role(self.chat_base_url)
         suggestions_str = ''
         if initial_suggestions is not None:
-            suggestions_str = json.dumps(initial_suggestions)
+            suggestions_str = self._json_dumps_safe(initial_suggestions)
 
         # Generate tools and functions from api_calls
         more_tools, more_functions = generate_tools_from_api_calls(api_calls)
@@ -634,6 +634,15 @@ class Assistant:
         if len(raw) > max_chars:
             raw = raw[:max_chars] + "... [truncated]"
         return raw
+
+    def _json_dumps_safe(self, value, *, indent=None):
+        try:
+            return json.dumps(value, default=str, indent=indent)
+        except Exception:
+            try:
+                return json.dumps(str(value), indent=indent)
+            except Exception:
+                return "\"<serialization_failed>\""
 
     def _coerce_reasoning_text(self, value):
         if value is None:
@@ -1387,7 +1396,7 @@ class Assistant:
                     
                     # Check for structured content
                     if hasattr(result, 'structuredContent') and result.structuredContent:
-                        return json.dumps(result.structuredContent, indent=2)
+                        return self._json_dumps_safe(result.structuredContent, indent=2)
                     
                     return "Tool executed successfully"
                     
@@ -1637,7 +1646,7 @@ class Assistant:
                         result = self.execute_function(tool_call.function.name, tool_call.function.arguments, user_tokens)
                         output = {
                             "tool_call_id": tool_call.id,
-                            "output": json.dumps(result),
+                            "output": self._json_dumps_safe(result),
                             "tool_name": tool_call.function.name,
                             "tool_arguments": tool_call.function.arguments
                         }
@@ -1647,8 +1656,8 @@ class Assistant:
                         if tool_call.function.name in self.async_tools:
                             async_tool_names.append(tool_call.function.name)
                     compact_outputs = self._compact_tool_outputs_for_context(tool_outputs)
-                    data_['messages'] = data_['messages'] + [{"role": "system", "content": "Tool outputs from most recent attempt" + json.dumps(compact_outputs) + "\n If the above indicates an error, change the input and try again"}]
-                    thread["messages"].append({"role": "system", "content": "Tool outputs from most recent attempt: " + json.dumps(compact_outputs)})
+                    data_['messages'] = data_['messages'] + [{"role": "system", "content": "Tool outputs from most recent attempt" + self._json_dumps_safe(compact_outputs) + "\n If the above indicates an error, change the input and try again"}]
+                    thread["messages"].append({"role": "system", "content": "Tool outputs from most recent attempt: " + self._json_dumps_safe(compact_outputs)})
                     async_hint = self._async_tool_system_hint(async_tool_names)
                     if async_hint:
                         data_['messages'].append({"role": "system", "content": async_hint})
@@ -1669,17 +1678,17 @@ class Assistant:
             if self.save_memory is not None:
                 if self.embedding_model is None:
                     if self.embedding_client is not None:
-                        threading.Thread(target=self.save_memory, args=(self.thread_id, json.dumps({"input": user_message, "output": response_message}), self.embedding_client)).start()
+                        threading.Thread(target=self.save_memory, args=(self.thread_id, self._json_dumps_safe({"input": user_message, "output": response_message}), self.embedding_client)).start()
                     else:
-                        threading.Thread(target=self.save_memory, args=(self.thread_id, json.dumps({"input": user_message, "output": response_message}), self.openai_client)).start()
+                        threading.Thread(target=self.save_memory, args=(self.thread_id, self._json_dumps_safe({"input": user_message, "output": response_message}), self.openai_client)).start()
                 else:
                     if self.embedding_client is not None:
                         threading.Thread(target=self.save_memory, 
-                        args=(self.thread_id, json.dumps({"input": user_message, "output": response_message}), self.embedding_client), 
+                        args=(self.thread_id, self._json_dumps_safe({"input": user_message, "output": response_message}), self.embedding_client), 
                         kwargs={'model': self.embedding_model}).start()
                     else:
                         threading.Thread(target=self.save_memory, 
-                        args=(self.thread_id, json.dumps({"input": user_message, "output": response_message}), self.openai_client), 
+                        args=(self.thread_id, self._json_dumps_safe({"input": user_message, "output": response_message}), self.openai_client), 
                         kwargs={'model': self.embedding_model}).start()
             return response_message
         except Exception as e:
@@ -1868,7 +1877,7 @@ class Assistant:
                             output_result = self.execute_function(tool_name, tool_args, user_tokens)
                             output = {
                                 "tool_call_id": call_id,
-                                "output": json.dumps(output_result),
+                                "output": self._json_dumps_safe(output_result),
                                 "tool_name": tool_name,
                                 "tool_arguments": tool_args
                             }
@@ -1879,7 +1888,7 @@ class Assistant:
                                 pass
                             output = {
                                 "tool_call_id": call_id,
-                                "output": json.dumps({"error": str(e)}),
+                                "output": self._json_dumps_safe({"error": str(e)}),
                                 "tool_name": tool_name,
                                 "tool_arguments": tool_args
                             }
@@ -1906,7 +1915,7 @@ class Assistant:
                             "content": output["output"]
                         })
                     try:
-                        thread["messages"].append({"role": "system", "content": "Tool outputs from most recent attempt: " + json.dumps(compact_outputs)})
+                        thread["messages"].append({"role": "system", "content": "Tool outputs from most recent attempt: " + self._json_dumps_safe(compact_outputs)})
                         self.put_thread(self.thread_id, thread["messages"])
                     except Exception:
                         pass
@@ -1941,17 +1950,17 @@ class Assistant:
             if self.save_memory is not None:
                 if self.embedding_model is None:
                     if self.embedding_client is not None:
-                        threading.Thread(target=self.save_memory, args=(self.thread_id, json.dumps({"input": user_message, "output": result}), self.embedding_client)).start()
+                        threading.Thread(target=self.save_memory, args=(self.thread_id, self._json_dumps_safe({"input": user_message, "output": result}), self.embedding_client)).start()
                     else:
-                        threading.Thread(target=self.save_memory, args=(self.thread_id, json.dumps({"input": user_message, "output": result}), self.openai_client)).start()
+                        threading.Thread(target=self.save_memory, args=(self.thread_id, self._json_dumps_safe({"input": user_message, "output": result}), self.openai_client)).start()
                 else:
                     if self.embedding_client is not None:
                         threading.Thread(target=self.save_memory, 
-                        args=(self.thread_id, json.dumps({"input": user_message, "output": result}), self.openai_client), 
+                        args=(self.thread_id, self._json_dumps_safe({"input": user_message, "output": result}), self.openai_client), 
                         kwargs={'model': self.embedding_model}).start()
                     else:
                         threading.Thread(target=self.save_memory, 
-                        args=(self.thread_id, json.dumps({"input": user_message, "output": result}), self.openai_client), 
+                        args=(self.thread_id, self._json_dumps_safe({"input": user_message, "output": result}), self.openai_client), 
                         kwargs={'model': self.embedding_model}).start()
             return result
         except Exception as e:
@@ -2044,7 +2053,7 @@ class Assistant:
                         result = self.execute_function(tool_call.function.name, tool_call.function.arguments, user_token=user_token)
                         output = {
                             "tool_call_id": tool_call.id,
-                            "output": json.dumps(result)
+                            "output": self._json_dumps_safe(result)
                         }
                         if self.event_listener is not None:
                             self.event_listener(output)
