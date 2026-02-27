@@ -440,6 +440,7 @@ class Assistant:
         self.initial_suggestions = initial_suggestions
         self.chat_base_url = str(base_url or "").strip()
         self._chat_disallow_system_role = self._should_disallow_system_role(self.chat_base_url)
+        self._openai_direct_client = None
         suggestions_str = ''
         if initial_suggestions is not None:
             suggestions_str = self._json_dumps_safe(initial_suggestions)
@@ -552,6 +553,94 @@ class Assistant:
         except Exception:
             host = ""
         return "minimaxi.chat" in host
+
+    def _is_minimax_base_url(self):
+        try:
+            host = (urlparse(str(self.chat_base_url or "")).netloc or "").lower()
+        except Exception:
+            host = ""
+        return "minimaxi.chat" in host
+
+    def _payload_contains_image_inputs(self, payload):
+        if not isinstance(payload, dict):
+            return False
+        for msg in (payload.get("messages") or []):
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                part_type = str(part.get("type") or "").strip().lower()
+                if part_type in {"image_url", "input_image"}:
+                    return True
+        return False
+
+    def _model_supports_image_inputs(self, model_name):
+        model = str(model_name or "").strip().lower()
+        if not model:
+            model = str(self.model or "").strip().lower()
+        if self._is_minimax_base_url():
+            return False
+        if "minimax" in model or "m2.5" in model:
+            return False
+        return True
+
+    def _image_fallback_model(self):
+        override = str(os.getenv("ASSISTANT_IMAGE_FALLBACK_MODEL", "") or "").strip()
+        return override or "gpt-5-mini"
+
+    def _get_openai_direct_client(self):
+        if self._openai_direct_client is not None:
+            return self._openai_direct_client
+        try:
+            from openai import OpenAI
+        except Exception:
+            return None
+        try:
+            api_key = str(os.getenv("OPENAI_API_KEY", "") or "").strip() or None
+            if api_key:
+                self._openai_direct_client = OpenAI(api_key=api_key)
+            else:
+                self._openai_direct_client = OpenAI()
+        except Exception:
+            self._openai_direct_client = None
+        return self._openai_direct_client
+
+    def _ensure_image_model_compatibility(self, payload):
+        if not self._payload_contains_image_inputs(payload):
+            return self.openai_client
+
+        requested_model = str((payload or {}).get("model") or self.model or "").strip()
+        if self._model_supports_image_inputs(requested_model):
+            return self.openai_client
+
+        fallback_model = self._image_fallback_model()
+        if not fallback_model:
+            return self.openai_client
+
+        if requested_model.lower() != fallback_model.lower():
+            logger.info(
+                "Detected image input with non-image model '%s'; falling back to '%s'",
+                requested_model,
+                fallback_model,
+            )
+
+        payload["model"] = fallback_model
+        if "gpt-5" in fallback_model.lower():
+            if payload.get("max_completion_tokens") is None and payload.get("max_tokens") is not None:
+                payload["max_completion_tokens"] = payload.get("max_tokens")
+            payload.pop("max_tokens", None)
+
+        if self._is_minimax_base_url():
+            payload.pop("extra_body", None)
+            direct_client = self._get_openai_direct_client()
+            if direct_client is not None:
+                return direct_client
+
+        return self.openai_client
 
     def _system_prompt_as_user_content(self, content):
         text = self._content_to_text(content).strip()
@@ -1176,9 +1265,10 @@ class Assistant:
         msg_tokens = self._estimate_messages_tokens(data.get("messages") or [])
         tools_tokens = 0
         tools = data.get("tools") or []
+        model_for_encoding = str(data.get("model") or self.model or "").strip()
         if tools:
             try:
-                enc = tiktoken.encoding_for_model(self.model)
+                enc = tiktoken.encoding_for_model(model_for_encoding or self.model)
             except Exception:
                 enc = encoding
             try:
@@ -1188,7 +1278,8 @@ class Assistant:
         return int(msg_tokens + tools_tokens + 32)
 
     def _apply_proactive_output_cap(self, payload):
-        if "gpt-5" not in str(self.model or "").lower():
+        model_name = str((payload or {}).get("model") or self.model or "").lower()
+        if "gpt-5" not in model_name:
             return False
         if not isinstance(payload, dict):
             return False
@@ -1307,7 +1398,9 @@ class Assistant:
         last_error = None
         for _ in range(attempts):
             try:
-                return self.openai_client.chat.completions.create(**self._prepare_chat_payload(payload))
+                chat_client = self._ensure_image_model_compatibility(payload)
+                self._apply_proactive_output_cap(payload)
+                return chat_client.chat.completions.create(**self._prepare_chat_payload(payload))
             except Exception as e:
                 last_error = e
                 err_text = str(e or "")
