@@ -17,6 +17,21 @@ GPT Plugins 4All is a Python library designed to facilitate the integration of G
 - Easily create AI Assistants that have these functions (and search, view page, and RAG, and others) using any openai-compatible api (eg OpenRouter, novita, Deepseek)
 - AI assistant streaming for real-time applications like phone calls
 - Handles images, sends events
+- Built-in web search tool (`search_google`) now supports Serper (`SERPER_API_KEY`) with automatic fallback to free DuckDuckGo HTML search
+
+### Web Search Provider
+
+`search_google` (tool name kept for backward compatibility) now uses this provider order:
+
+1. Serper (`SERPER_API_KEY`) if configured
+2. DuckDuckGo HTML search (free, no API key)
+3. Legacy `googlesearch` package if installed
+
+Optional overrides:
+
+- `SERPER_API_KEY`: Enables Serper for Google-quality results
+- `SERPER_API_URL`: Custom Serper-compatible endpoint (default `https://google.serper.dev/search`)
+- `GPTPLUGINS_SEARCH_PROVIDER`: Force preferred order start (`serper`, `duckduckgo`, or `google`)
 ## Installation
 
 Install GPT Plugins 4All using pip:

@@ -15,7 +15,12 @@ setup(
         "Source Code": "https://github.com/DataStreams-Solutions/GPTPlugins4All",
     },
     install_requires=[
-        'PyYAML', 'requests', 'openapi-spec-validator', 'playwright','bs4', 'googlesearch-python @ git+https://github.com/stanfrbd/googlesearch@lynx-user-agent', 'tiktoken'
+        'PyYAML',
+        'requests',
+        'openapi-spec-validator',
+        'playwright',
+        'bs4',
+        'tiktoken',
     ],
     extras_require={
         'openai':  ["openai"]

@@ -6,13 +6,16 @@ import uuid
 import threading
 import requests
 from bs4 import BeautifulSoup
-from googlesearch import search
+try:
+    from googlesearch import search as google_search
+except Exception:
+    google_search = None
 import base64
 import copy
 from datetime import datetime
 import logging
 import re
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 load_dotenv()
 
@@ -23,19 +26,174 @@ encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
 logger = logging.getLogger(__name__)
 
 cost_dict = {'o3-mini': 110/1000000, 'gpt-3.5-turbo': 1/1000000, 'o1': 60000/1000000, 'gpt-4o': 1000/1000000, 'gpt-4o-mini': 60/1000000}
+SEARCH_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+
+
+def _format_search_results(query, provider, results):
+    lines = []
+    for item in results:
+        url = str(item.get("url", "")).strip()
+        title = str(item.get("title", "")).strip()
+        description = str(item.get("description", "")).strip()
+        if not any([url, title, description]):
+            continue
+        lines.append(f"{url} - {title} - {description}")
+    if not lines:
+        return "No search results found for: " + query
+    return f"Results from web search ({provider}): {query}\n" + "\n\n".join(lines)
+
+
+def _normalize_duckduckgo_redirect_url(url):
+    if not url:
+        return ""
+    normalized = str(url).strip()
+    if normalized.startswith("//"):
+        normalized = "https:" + normalized
+    parsed = urlparse(normalized)
+    if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
+        redirect_target = parse_qs(parsed.query).get("uddg", [""])[0]
+        if redirect_target:
+            return unquote(redirect_target)
+    return normalized
+
+
+def _search_with_serper(query, num_results=6):
+    api_key = os.getenv("SERPER_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("SERPER_API_KEY is not configured")
+
+    endpoint = os.getenv("SERPER_API_URL", "https://google.serper.dev/search")
+    payload = {
+        "q": query,
+        "num": int(num_results),
+        "gl": "us",
+        "hl": "en",
+    }
+    headers = {
+        "X-API-KEY": api_key,
+        "Content-Type": "application/json",
+    }
+    response = requests.post(endpoint, json=payload, headers=headers, timeout=20)
+    response.raise_for_status()
+    body = response.json()
+    organic = body.get("organic", []) or []
+    results = []
+    for row in organic[:num_results]:
+        results.append(
+            {
+                "url": row.get("link", ""),
+                "title": row.get("title", ""),
+                "description": row.get("snippet", ""),
+            }
+        )
+    if not results:
+        raise RuntimeError("Serper returned no organic results")
+    return results
+
+
+def _search_with_duckduckgo(query, num_results=6):
+    response = requests.get(
+        "https://html.duckduckgo.com/html/",
+        params={"q": query, "kl": "us-en"},
+        headers={"User-Agent": SEARCH_USER_AGENT},
+        timeout=20,
+    )
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    results = []
+    seen = set()
+    for result in soup.select("div.result"):
+        link = result.select_one("a.result__a")
+        snippet = result.select_one(".result__snippet")
+        if link is None:
+            continue
+        url = _normalize_duckduckgo_redirect_url(link.get("href", ""))
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        results.append(
+            {
+                "url": url,
+                "title": link.get_text(" ", strip=True),
+                "description": snippet.get_text(" ", strip=True) if snippet else "",
+            }
+        )
+        if len(results) >= num_results:
+            break
+
+    if not results:
+        for link in soup.select("a.result-link"):
+            url = _normalize_duckduckgo_redirect_url(link.get("href", ""))
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            results.append({"url": url, "title": link.get_text(" ", strip=True), "description": ""})
+            if len(results) >= num_results:
+                break
+
+    if not results:
+        raise RuntimeError("DuckDuckGo returned no results")
+    return results
+
+
+def _search_with_legacy_google(query, num_results=6):
+    if google_search is None:
+        raise RuntimeError("googlesearch dependency is unavailable")
+    results = []
+    for row in google_search(query, num_results=num_results, advanced=True, lang="en", region="US"):
+        results.append(
+            {
+                "url": getattr(row, "url", ""),
+                "title": getattr(row, "title", ""),
+                "description": getattr(row, "description", ""),
+            }
+        )
+    if not results:
+        raise RuntimeError("Legacy Google search returned no results")
+    return results
+
+
 def search_google(query, num_results=6):
-    search_results = []
-    res_string = ""
-    print("Searching google for: " + query)
+    query = str(query or "").strip()
+    if not query:
+        return "Error: query is required"
     try:
-        for j in search(query, num_results=num_results, advanced=True,lang="en",
-            region="US"):
-            search_results.append(j)
-            res_string += j.url + " - " + j.title + " - "+j.description
-            res_string += "\n\n"
-        return "Results from google search: " + query + "\n" + res_string
-    except Exception as e:
-        return "Error: " + str(e)
+        num_results = int(num_results)
+    except Exception:
+        num_results = 6
+    num_results = max(1, min(num_results, 10))
+
+    preferred_provider = str(os.getenv("GPTPLUGINS_SEARCH_PROVIDER", "")).strip().lower()
+    provider_orders = {
+        "serper": ["serper", "duckduckgo", "google"],
+        "duckduckgo": ["duckduckgo", "serper", "google"],
+        "google": ["google", "serper", "duckduckgo"],
+    }
+    providers = provider_orders.get(preferred_provider, ["serper", "duckduckgo", "google"])
+    logger.info("Searching web for query='%s' providers=%s", query, providers)
+
+    errors = []
+    provider_handlers = {
+        "serper": _search_with_serper,
+        "duckduckgo": _search_with_duckduckgo,
+        "google": _search_with_legacy_google,
+    }
+
+    for provider in providers:
+        handler = provider_handlers.get(provider)
+        if handler is None:
+            continue
+        try:
+            results = handler(query, num_results=num_results)
+            return _format_search_results(query, provider, results)
+        except Exception as e:
+            logger.warning("Search provider '%s' failed for query '%s': %s", provider, query, e)
+            errors.append(f"{provider}: {str(e)}")
+
+    if errors:
+        return "Error: web search failed for query '" + query + "'. " + " | ".join(errors)
+    return "Error: web search failed for query '" + query + "'. No provider could return results."
 
 def leftTruncate(text, length):
     encoded = encoding.encode(text)
@@ -1251,7 +1409,7 @@ class Assistant:
                 "type": "function",
                 "function": {
                     "name": "search_google",
-                    "description": "Searches Google for a given query",
+                    "description": "Searches the web for a given query. Uses Serper when configured.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -1403,7 +1561,7 @@ class Assistant:
                 "type": "function",
                 "function": {
                     "name": "search_google",
-                    "description": "Searches Google for a given query",
+                    "description": "Searches the web for a given query. Uses Serper when configured.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -1586,7 +1744,7 @@ class Assistant:
                 "type": "function",
                 "function": {
                     "name": "search_google",
-                    "description": "Searches Google for a given query",
+                    "description": "Searches the web for a given query. Uses Serper when configured.",
                     "parameters": {
                         "type": "object",
                         "properties": {
