@@ -709,6 +709,7 @@ class Assistant:
                 continue
             sanitized_messages.append(normalized)
         payload["messages"] = sanitized_messages
+        payload["tools"] = self._normalize_tool_schemas(payload.get("tools"))
 
         if not payload.get("tools"):
             payload.pop("tools", None)
@@ -716,6 +717,47 @@ class Assistant:
         elif payload.get("tool_choice") is None:
             payload.pop("tool_choice", None)
         return payload
+
+    def _normalize_tool_schema_fragment(self, schema_fragment):
+        if isinstance(schema_fragment, list):
+            return [self._normalize_tool_schema_fragment(item) for item in schema_fragment]
+        if not isinstance(schema_fragment, dict):
+            return schema_fragment
+
+        normalized = {
+            key: self._normalize_tool_schema_fragment(value)
+            for key, value in schema_fragment.items()
+        }
+        type_value = normalized.get("type")
+        has_array_type = (
+            type_value == "array"
+            or (
+                isinstance(type_value, list)
+                and any(str(t or "").strip().lower() == "array" for t in type_value)
+            )
+        )
+        if has_array_type and "items" not in normalized:
+            normalized["items"] = {"type": "string"}
+        if normalized.get("enum") == []:
+            normalized.pop("enum", None)
+        return normalized
+
+    def _normalize_tool_schemas(self, tools):
+        if not isinstance(tools, list):
+            return tools
+        normalized_tools = []
+        for tool in tools:
+            if not isinstance(tool, dict):
+                normalized_tools.append(tool)
+                continue
+            tool_copy = copy.deepcopy(tool)
+            fn = tool_copy.get("function")
+            if isinstance(fn, dict):
+                params = fn.get("parameters")
+                if isinstance(params, dict):
+                    fn["parameters"] = self._normalize_tool_schema_fragment(params)
+            normalized_tools.append(tool_copy)
+        return normalized_tools
 
     def _normalize_text_for_context(self, text, max_chars=500):
         raw = str(text or "")
