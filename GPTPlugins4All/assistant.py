@@ -2031,22 +2031,43 @@ class Assistant:
                 for response_chunk in completion:
                     if self.stop_check and self.stop_check():
                         return
-                    delta = response_chunk.choices[0].delta
-                    finish_reason = response_chunk.choices[0].finish_reason or finish_reason
-                    delta_reasoning = self._extract_reasoning_from_obj(delta)
-                    if delta_reasoning:
-                        reasoning_chunks.append(delta_reasoning)
-                    if delta.content is not None:
-                        raw_result += delta.content
-                        visible_chunk, reasoning_chunk = self._consume_stream_think_chunk(delta.content, think_stream_state)
-                        if reasoning_chunk:
-                            reasoning_chunks.append(reasoning_chunk)
-                        if visible_chunk:
-                            result += visible_chunk
-                            yield visible_chunk
+                    try:
+                        choices = getattr(response_chunk, "choices", None) or []
+                        if not choices:
+                            continue
+                        first_choice = choices[0]
+                        finish_reason = getattr(first_choice, "finish_reason", None) or finish_reason
+                        delta = getattr(first_choice, "delta", None)
+                        if delta is None:
+                            continue
 
-                    if delta.tool_calls:
-                        for tool_call in delta.tool_calls:
+                        delta_reasoning = self._extract_reasoning_from_obj(delta)
+                        if delta_reasoning:
+                            reasoning_chunks.append(delta_reasoning)
+
+                        delta_content = getattr(delta, "content", None)
+                        if delta_content is not None:
+                            if isinstance(delta_content, list):
+                                text_parts = []
+                                for part in delta_content:
+                                    if isinstance(part, dict):
+                                        text_parts.append(str(part.get("text") or ""))
+                                    else:
+                                        text_parts.append(str(getattr(part, "text", "") or ""))
+                                delta_text = "".join(text_parts)
+                            else:
+                                delta_text = str(delta_content)
+                            if delta_text:
+                                raw_result += delta_text
+                                visible_chunk, reasoning_chunk = self._consume_stream_think_chunk(delta_text, think_stream_state)
+                                if reasoning_chunk:
+                                    reasoning_chunks.append(reasoning_chunk)
+                                if visible_chunk:
+                                    result += visible_chunk
+                                    yield visible_chunk
+
+                        delta_tool_calls = getattr(delta, "tool_calls", None) or []
+                        for tool_call in delta_tool_calls:
                             call_id = tool_call.id
                             try:
                                 idx = tool_call.index
@@ -2068,6 +2089,12 @@ class Assistant:
                                 tool_calls[call_id]["name"] = tool_call.function.name
                             if tool_call.function.arguments:
                                 tool_calls[call_id]["arguments"] += tool_call.function.arguments
+                    except Exception:
+                        try:
+                            logger.exception("Skipping malformed streaming chunk")
+                        except Exception:
+                            pass
+                        continue
 
                 if tool_calls:
                     tool_outputs = []
