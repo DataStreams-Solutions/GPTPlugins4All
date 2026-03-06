@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 cost_dict = {'o3-mini': 110/1000000, 'gpt-3.5-turbo': 1/1000000, 'o1': 60000/1000000, 'gpt-4o': 1000/1000000, 'gpt-4o-mini': 60/1000000}
 SEARCH_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+OPENAI_CHAT_TOOL_LIMIT = 128
 
 
 def _format_search_results(query, provider, results):
@@ -710,6 +711,10 @@ class Assistant:
             sanitized_messages.append(normalized)
         payload["messages"] = sanitized_messages
         payload["tools"] = self._normalize_tool_schemas(payload.get("tools"))
+        payload["tools"] = self._prune_tools_for_provider(
+            payload.get("tools"),
+            payload.get("messages") or [],
+        )
 
         if not payload.get("tools"):
             payload.pop("tools", None)
@@ -717,6 +722,203 @@ class Assistant:
         elif payload.get("tool_choice") is None:
             payload.pop("tool_choice", None)
         return payload
+
+    def _max_tools_for_provider(self):
+        try:
+            model_name = str(self.model or "").strip().lower()
+        except Exception:
+            model_name = ""
+        if model_name.startswith("gpt-") or model_name.startswith("o1") or model_name.startswith("o3"):
+            return OPENAI_CHAT_TOOL_LIMIT
+        if not self.chat_base_url:
+            return OPENAI_CHAT_TOOL_LIMIT
+        try:
+            host = (urlparse(str(self.chat_base_url or "")).netloc or "").lower()
+        except Exception:
+            host = ""
+        if host.endswith("openai.com") or host == "api.openai.com":
+            return OPENAI_CHAT_TOOL_LIMIT
+        return 0
+
+    def _message_text_for_tool_selection(self, messages):
+        if not isinstance(messages, list):
+            return ""
+        chunks = []
+        for msg in reversed(messages[-8:]):
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role") or "").strip().lower()
+            if role not in {"user", "assistant", "system"}:
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                text = content.strip()
+                if text:
+                    chunks.append(text)
+            elif isinstance(content, list):
+                parts = []
+                for item in content:
+                    if isinstance(item, dict):
+                        item_type = str(item.get("type") or "").strip().lower()
+                        if item_type in {"text", "input_text"}:
+                            text = str(item.get("text") or "").strip()
+                            if text:
+                                parts.append(text)
+                            continue
+                        if item_type in {"image_url", "input_image"}:
+                            parts.append("image")
+                            continue
+                        if item_type in {"video_url", "input_video"}:
+                            parts.append("video")
+                            continue
+                        text = str(item.get("content") or "").strip()
+                        if text:
+                            parts.append(text)
+                    else:
+                        text = str(item or "").strip()
+                        if text:
+                            parts.append(text)
+                if parts:
+                    chunks.append(" ".join(parts))
+            if len(chunks) >= 3:
+                break
+        return "\n".join(reversed(chunks)).strip()
+
+    def _tool_selection_terms(self, message_text):
+        raw = str(message_text or "").lower()
+        tokens = set(re.findall(r"[a-z0-9_]{3,}", raw))
+        phrase_tokens = set()
+        for token in list(tokens):
+            if "_" in token:
+                phrase_tokens.update([part for part in token.split("_") if len(part) >= 3])
+        return tokens | phrase_tokens
+
+    def _tool_selection_score(self, tool, message_text, selection_terms, original_index):
+        if not isinstance(tool, dict):
+            return (-100000, -original_index)
+        fn = tool.get("function") if isinstance(tool.get("function"), dict) else {}
+        name = str(fn.get("name") or tool.get("type") or "").strip().lower()
+        description = str(fn.get("description") or "").strip().lower()
+        haystack = f"{name} {description}".strip()
+        haystack_terms = self._tool_selection_terms(haystack)
+
+        score = 0
+        if name:
+            if name in message_text:
+                score += 300
+            name_parts = [part for part in re.split(r"[^a-z0-9]+", name) if len(part) >= 3]
+            if name_parts:
+                exact_name_overlap = sum(1 for part in name_parts if part in selection_terms)
+                score += exact_name_overlap * 45
+        overlap = len(selection_terms & haystack_terms)
+        score += overlap * 12
+
+        search_terms = {"search", "find", "lookup", "look", "google", "web", "website", "site", "browse"}
+        media_terms = {"video", "image", "stills", "still", "frame", "frames", "media", "canvas", "ffmpeg", "daytona"}
+        workspace_terms = {"workspace", "file", "files", "path", "upload", "download", "artifact"}
+        connector_terms = {"api", "connector", "endpoint", "webhook", "hubspot", "salesforce"}
+        linkedin_terms = {"linkedin", "comment", "post", "reply", "connect", "pipeline", "sequence", "campaign"}
+
+        if name in {"search_google", "scrape_text"} and selection_terms & search_terms:
+            score += 120
+        if name.startswith("operator_") and selection_terms & workspace_terms:
+            score += 80
+        if name.startswith("operator_") and selection_terms & media_terms:
+            score += 140
+        if ("connector" in name or "api" in name) and selection_terms & connector_terms:
+            score += 90
+        if ("linkedin" in haystack or "campaign" in haystack or "sequence" in haystack) and selection_terms & linkedin_terms:
+            score += 90
+
+        return (score, -original_index)
+
+    def _prune_tools_for_provider(self, tools, messages):
+        if not isinstance(tools, list):
+            return tools
+        max_tools = self._max_tools_for_provider()
+        if max_tools <= 0 or len(tools) <= max_tools:
+            return tools
+
+        deduped = []
+        seen_names = set()
+        for tool in tools:
+            if not isinstance(tool, dict):
+                deduped.append(tool)
+                continue
+            fn = tool.get("function") if isinstance(tool.get("function"), dict) else {}
+            name = str(fn.get("name") or "").strip()
+            key = name or self._json_dumps_safe(tool)
+            if key in seen_names:
+                continue
+            seen_names.add(key)
+            deduped.append(tool)
+
+        if len(deduped) <= max_tools:
+            return deduped
+
+        message_text = self._message_text_for_tool_selection(messages).lower()
+        selection_terms = self._tool_selection_terms(message_text)
+        ranked = []
+        for index, tool in enumerate(deduped):
+            ranked.append((self._tool_selection_score(tool, message_text, selection_terms, index), index, tool))
+        ranked.sort(key=lambda row: (row[0][0], row[0][1]), reverse=True)
+        selected = sorted(ranked[:max_tools], key=lambda row: row[1])
+        selected_tools = [row[2] for row in selected]
+
+        try:
+            dropped_names = []
+            for _score, _index, tool in ranked[max_tools:]:
+                fn = tool.get("function") if isinstance(tool.get("function"), dict) else {}
+                dropped_names.append(str(fn.get("name") or tool.get("type") or "unknown"))
+            logger.info(
+                "Assistant pruned tools for provider limit: kept=%s dropped=%s model=%s last_user_terms=%s",
+                len(selected_tools),
+                len(ranked) - len(selected_tools),
+                self.model,
+                sorted(list(selection_terms))[:20],
+            )
+            if dropped_names:
+                logger.debug("Assistant dropped tool names: %s", dropped_names[:50])
+        except Exception:
+            pass
+
+        return selected_tools
+
+    def _tool_call_signature(self, tool_name, tool_arguments):
+        normalized_name = str(tool_name or "").strip()
+        raw_args = tool_arguments
+        if isinstance(raw_args, str):
+            try:
+                raw_args = json.loads(raw_args)
+            except Exception:
+                raw_args = str(tool_arguments or "").strip()
+        try:
+            normalized_args = json.dumps(raw_args, sort_keys=True, default=str)
+        except Exception:
+            normalized_args = str(raw_args)
+        return f"{normalized_name}::{normalized_args}"
+
+    def _tool_result_success(self, result):
+        if isinstance(result, dict):
+            if result.get("duplicate_call_blocked"):
+                return False
+            if "success" in result:
+                return bool(result.get("success"))
+            if result.get("error"):
+                return False
+        return True
+
+    def _duplicate_tool_output(self, tool_name, tool_arguments, prior_output):
+        return {
+            "duplicate_call_blocked": True,
+            "tool_name": str(tool_name or "").strip(),
+            "tool_arguments": tool_arguments,
+            "message": "This exact tool call already succeeded in this turn. Reuse the prior result and answer the user instead of calling it again.",
+            "prior_output_preview": self._normalize_text_for_context(
+                self._json_dumps_safe(prior_output),
+                max_chars=min(600, self.tool_output_context_max_chars),
+            ),
+        }
 
     def _normalize_tool_schema_fragment(self, schema_fragment):
         if isinstance(schema_fragment, list):
@@ -1231,6 +1433,17 @@ class Assistant:
             compacted.append(row)
         return compacted
 
+    def _tool_output_followup_hint(self, compact_outputs, *, force_no_more_tools=False):
+        message = (
+            "Tool outputs from most recent attempt: "
+            + self._json_dumps_safe(compact_outputs)
+            + "\nIf the tool output indicates success and already contains the requested result, do not call more tools. "
+            + "Answer the user using the latest tool result. Only retry a tool if the output indicates failure or missing required data."
+        )
+        if force_no_more_tools:
+            message += " Tool-call budget is exhausted for this turn. Do not call any more tools."
+        return message
+
     def _is_openrouter_base_url(self):
         try:
             host = (urlparse(str(self.chat_base_url or "")).netloc or "").lower()
@@ -1243,6 +1456,9 @@ class Assistant:
             return int(str(os.getenv(name, str(default))).strip())
         except Exception:
             return int(default)
+
+    def _max_tool_rounds(self):
+        return max(1, self._safe_int_env("ASSISTANT_MAX_TOOL_ROUNDS", 6))
 
     def _context_limit_tokens(self):
         explicit = self._safe_int_env("ASSISTANT_CONTEXT_LIMIT_TOKENS", 0)
@@ -1662,6 +1878,7 @@ class Assistant:
         if self.other_tools is not None:
             for tool in self.other_tools:
                 tools.append(tool)
+        tools = self._prune_tools_for_provider(tools, [])
 
         if valid_descriptions:
             desc_string = " Tool information below\n---------------\n" + "\n---------------\n".join(valid_descriptions)
@@ -1849,11 +2066,23 @@ class Assistant:
             completion = self._chat_completion_create_with_context_recovery(data_)
             print(self.configs)
             if self.raw_mode == False:
+                successful_tool_calls = {}
+                tool_rounds = 0
                 while completion.choices[0].message.role == "assistant" and completion.choices[0].message.tool_calls:
                     tool_outputs = []
                     async_tool_names = []
                     for tool_call in completion.choices[0].message.tool_calls:
-                        result = self.execute_function(tool_call.function.name, tool_call.function.arguments, user_tokens)
+                        signature = self._tool_call_signature(tool_call.function.name, tool_call.function.arguments)
+                        if signature in successful_tool_calls:
+                            result = self._duplicate_tool_output(
+                                tool_call.function.name,
+                                tool_call.function.arguments,
+                                successful_tool_calls[signature],
+                            )
+                        else:
+                            result = self.execute_function(tool_call.function.name, tool_call.function.arguments, user_tokens)
+                            if self._tool_result_success(result):
+                                successful_tool_calls[signature] = result
                         output = {
                             "tool_call_id": tool_call.id,
                             "output": self._json_dumps_safe(result),
@@ -1867,7 +2096,9 @@ class Assistant:
                             async_tool_names.append(tool_call.function.name)
                     compact_outputs = self._compact_tool_outputs_for_context(tool_outputs)
                     tool_image_urls = self._extract_tool_generated_image_urls(tool_outputs)
-                    data_['messages'] = data_['messages'] + [{"role": "system", "content": "Tool outputs from most recent attempt" + self._json_dumps_safe(compact_outputs) + "\n If the above indicates an error, change the input and try again"}]
+                    tool_rounds += 1
+                    force_no_more_tools = tool_rounds >= self._max_tool_rounds()
+                    data_['messages'] = data_['messages'] + [{"role": "system", "content": self._tool_output_followup_hint(compact_outputs, force_no_more_tools=force_no_more_tools)}]
                     thread["messages"].append({"role": "system", "content": "Tool outputs from most recent attempt: " + self._json_dumps_safe(compact_outputs)})
                     image_msg = self._tool_image_context_message(tool_image_urls)
                     if image_msg:
@@ -1875,6 +2106,9 @@ class Assistant:
                     async_hint = self._async_tool_system_hint(async_tool_names)
                     if async_hint:
                         data_['messages'].append({"role": "system", "content": async_hint})
+                    if force_no_more_tools:
+                        data_["tools"] = None
+                        data_.pop("tool_choice", None)
 
                     completion = self._chat_completion_create_with_context_recovery(data_)
             print(completion.choices[0].message)
@@ -2014,6 +2248,8 @@ class Assistant:
 
         #print(data_)
         done = False
+        successful_tool_calls = {}
+        tool_rounds = 0
         try:
             while not done:
                 if self.stop_check and self.stop_check():
@@ -2115,7 +2351,17 @@ class Assistant:
                         if self.emit_tool_preamble:
                             yield "Hang on, gotta " + tool_name_for_mess
                         try:
-                            output_result = self.execute_function(tool_name, tool_args, user_tokens)
+                            signature = self._tool_call_signature(tool_name, tool_args)
+                            if signature in successful_tool_calls:
+                                output_result = self._duplicate_tool_output(
+                                    tool_name,
+                                    tool_args,
+                                    successful_tool_calls[signature],
+                                )
+                            else:
+                                output_result = self.execute_function(tool_name, tool_args, user_tokens)
+                                if self._tool_result_success(output_result):
+                                    successful_tool_calls[signature] = output_result
                             output = {
                                 "tool_call_id": call_id,
                                 "output": self._json_dumps_safe(output_result),
@@ -2156,6 +2402,12 @@ class Assistant:
                             "tool_call_id": output["tool_call_id"],
                             "content": output["output"]
                         })
+                    tool_rounds += 1
+                    force_no_more_tools = tool_rounds >= self._max_tool_rounds()
+                    data_['messages'].append({
+                        "role": "system",
+                        "content": self._tool_output_followup_hint(compact_outputs, force_no_more_tools=force_no_more_tools),
+                    })
                     try:
                         thread["messages"].append({"role": "system", "content": "Tool outputs from most recent attempt: " + self._json_dumps_safe(compact_outputs)})
                         self.put_thread(self.thread_id, thread["messages"])
@@ -2167,6 +2419,9 @@ class Assistant:
                     async_hint = self._async_tool_system_hint(async_tool_names)
                     if async_hint:
                         data_['messages'].append({"role": "system", "content": async_hint})
+                    if force_no_more_tools:
+                        data_["tools"] = None
+                        data_.pop("tool_choice", None)
                     done = False
                     continue
 
@@ -2268,6 +2523,7 @@ class Assistant:
         print("Waiting for response")
         print(run.id)
         completed = False
+        successful_tool_calls = {}
         while not completed:
             run_ = self.openai_client.beta.threads.runs.retrieve(thread_id=self.thread.id, run_id=run.id)
             if run_.status == "completed":
@@ -2295,7 +2551,17 @@ class Assistant:
                                 user_token = user_tokens.get(tool_call.function.name.split('-', 1)[0])
                             else:
                                 user_token = user_tokens[self.configs[0].name]
-                        result = self.execute_function(tool_call.function.name, tool_call.function.arguments, user_token=user_token)
+                        signature = self._tool_call_signature(tool_call.function.name, tool_call.function.arguments)
+                        if signature in successful_tool_calls:
+                            result = self._duplicate_tool_output(
+                                tool_call.function.name,
+                                tool_call.function.arguments,
+                                successful_tool_calls[signature],
+                            )
+                        else:
+                            result = self.execute_function(tool_call.function.name, tool_call.function.arguments, user_token=user_token)
+                            if self._tool_result_success(result):
+                                successful_tool_calls[signature] = result
                         output = {
                             "tool_call_id": tool_call.id,
                             "output": self._json_dumps_safe(result)
