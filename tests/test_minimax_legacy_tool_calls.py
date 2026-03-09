@@ -165,4 +165,4 @@ def test_minimax_defaults_to_higher_tool_round_budget(monkeypatch):
     monkeypatch.delenv("ASSISTANT_MAX_TOOL_ROUNDS", raising=False)
     monkeypatch.delenv("ASSISTANT_MAX_TOOL_ROUNDS_MINIMAX", raising=False)
     monkeypatch.delenv("ASSISTANT_MAX_TOOL_ROUNDS_DEFAULT", raising=False)
-    assert assistant._max_tool_rounds() == 18
+    assert assistant._max_tool_rounds() == 40
