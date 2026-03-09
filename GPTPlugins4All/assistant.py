@@ -1591,7 +1591,7 @@ class Assistant:
         if explicit > 0:
             return max(1, explicit)
         if self._is_minimax_base_url():
-            return max(1, self._safe_int_env("ASSISTANT_MAX_TOOL_ROUNDS_MINIMAX", 40))
+            return max(1, self._safe_int_env("ASSISTANT_MAX_TOOL_ROUNDS_MINIMAX", 80))
         return max(1, self._safe_int_env("ASSISTANT_MAX_TOOL_ROUNDS_DEFAULT", 6))
 
     def _context_limit_tokens(self):
