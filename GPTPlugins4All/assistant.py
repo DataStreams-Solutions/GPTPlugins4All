@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import ast
 from dotenv import load_dotenv
 import uuid
 import threading
@@ -1036,6 +1037,88 @@ class Assistant:
         reasoning = "\n\n".join([x for x in extracted if x]).strip()
         return cleaned, reasoning
 
+    def _strip_legacy_tool_call_blocks(self, text):
+        raw = str(text or "")
+        if not raw:
+            return "", []
+        pattern = re.compile(r"\[TOOL_CALL\](.*?)\[/TOOL_CALL\]", re.IGNORECASE | re.DOTALL)
+        blocks = []
+
+        def _capture(match):
+            body = str(match.group(1) or "").strip()
+            if body:
+                blocks.append(body)
+            return ""
+
+        cleaned = pattern.sub(_capture, raw)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        return cleaned, blocks
+
+    def _parse_legacy_tool_value(self, raw_value):
+        value = str(raw_value or "").strip().rstrip(",")
+        if not value:
+            return True
+        if value[0] == value[-1] and value[0] in {'"', "'"}:
+            return value[1:-1]
+        lowered = value.lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+        if lowered == "null":
+            return None
+        try:
+            if re.match(r"^-?\d+$", value):
+                return int(value)
+            if re.match(r"^-?\d+\.\d+$", value):
+                return float(value)
+        except Exception:
+            pass
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                return parser(value)
+            except Exception:
+                continue
+        return value
+
+    def _parse_legacy_tool_calls(self, text):
+        _cleaned, blocks = self._strip_legacy_tool_call_blocks(text)
+        parsed_calls = []
+        for idx, block in enumerate(blocks):
+            tool_match = re.search(r'tool\s*=>\s*["\']([^"\']+)["\']', block, re.IGNORECASE)
+            if not tool_match:
+                tool_match = re.search(r'tool\s*:\s*["\']([^"\']+)["\']', block, re.IGNORECASE)
+            tool_name = str((tool_match.group(1) if tool_match else "") or "").strip()
+            if not tool_name:
+                continue
+
+            args = {}
+            args_match = re.search(r"args\s*=>\s*\{(.*)\}\s*$", block, re.IGNORECASE | re.DOTALL)
+            if not args_match:
+                args_match = re.search(r"args\s*:\s*\{(.*)\}\s*$", block, re.IGNORECASE | re.DOTALL)
+            args_body = str((args_match.group(1) if args_match else "") or "")
+            if args_body:
+                for raw_line in args_body.splitlines():
+                    line = str(raw_line or "").strip()
+                    if not line or not line.startswith("--"):
+                        continue
+                    match = re.match(r"--([a-zA-Z0-9_-]+)(?:\s+(.*))?$", line)
+                    if not match:
+                        continue
+                    key = str(match.group(1) or "").strip().replace("-", "_")
+                    if not key:
+                        continue
+                    args[key] = self._parse_legacy_tool_value(match.group(2) or "")
+
+            parsed_calls.append(
+                {
+                    "id": f"legacy_call_{idx}",
+                    "name": tool_name,
+                    "arguments": json.dumps(args, ensure_ascii=True),
+                }
+            )
+        return parsed_calls
+
     def _merge_reasoning_text(self, *parts):
         merged = []
         seen = set()
@@ -1097,6 +1180,52 @@ class Assistant:
         state["pending"] = pending
         state["in_think"] = in_think
         return "".join(visible_out), "".join(reasoning_out)
+
+    def _consume_stream_legacy_tool_call_chunk(self, chunk, state):
+        text = str(chunk or "")
+        if not text:
+            return ""
+        pending = str(state.get("pending") or "") + text
+        in_tool_call = bool(state.get("in_tool_call"))
+        visible_out = []
+        start_tag = "[TOOL_CALL]"
+        end_tag = "[/TOOL_CALL]"
+
+        while True:
+            if in_tool_call:
+                end_idx = pending.find(end_tag)
+                if end_idx >= 0:
+                    pending = pending[end_idx + len(end_tag):]
+                    in_tool_call = False
+                    continue
+                safe_len = max(0, len(pending) - (len(end_tag) - 1))
+                if safe_len > 0:
+                    pending = pending[safe_len:]
+                break
+            start_idx = pending.find(start_tag)
+            if start_idx >= 0:
+                visible_out.append(pending[:start_idx])
+                pending = pending[start_idx + len(start_tag):]
+                in_tool_call = True
+                continue
+            safe_len = max(0, len(pending) - (len(start_tag) - 1))
+            if safe_len > 0:
+                visible_out.append(pending[:safe_len])
+                pending = pending[safe_len:]
+            break
+
+        state["pending"] = pending
+        state["in_tool_call"] = in_tool_call
+        return "".join(visible_out)
+
+    def _flush_stream_legacy_tool_call_state(self, state):
+        pending = str(state.get("pending") or "")
+        in_tool_call = bool(state.get("in_tool_call"))
+        state["pending"] = ""
+        state["in_tool_call"] = False
+        if not pending or in_tool_call:
+            return ""
+        return pending
 
     def _flush_stream_think_state(self, state):
         pending = str(state.get("pending") or "")
@@ -1458,7 +1587,12 @@ class Assistant:
             return int(default)
 
     def _max_tool_rounds(self):
-        return max(1, self._safe_int_env("ASSISTANT_MAX_TOOL_ROUNDS", 6))
+        explicit = self._safe_int_env("ASSISTANT_MAX_TOOL_ROUNDS", 0)
+        if explicit > 0:
+            return max(1, explicit)
+        if self._is_minimax_base_url():
+            return max(1, self._safe_int_env("ASSISTANT_MAX_TOOL_ROUNDS_MINIMAX", 18))
+        return max(1, self._safe_int_env("ASSISTANT_MAX_TOOL_ROUNDS_DEFAULT", 6))
 
     def _context_limit_tokens(self):
         explicit = self._safe_int_env("ASSISTANT_CONTEXT_LIMIT_TOKENS", 0)
@@ -2068,32 +2202,62 @@ class Assistant:
             if self.raw_mode == False:
                 successful_tool_calls = {}
                 tool_rounds = 0
-                while completion.choices[0].message.role == "assistant" and completion.choices[0].message.tool_calls:
+                while completion.choices[0].message.role == "assistant":
+                    current_message = completion.choices[0].message
+                    raw_message_text = self._content_to_text(getattr(current_message, "content", ""))
+                    legacy_tool_calls = []
+                    native_tool_calls = list(getattr(current_message, "tool_calls", None) or [])
+                    if not native_tool_calls:
+                        legacy_tool_calls = self._parse_legacy_tool_calls(raw_message_text)
+                    tool_calls_to_run = native_tool_calls or legacy_tool_calls
+                    if not tool_calls_to_run:
+                        break
                     tool_outputs = []
                     async_tool_names = []
-                    for tool_call in completion.choices[0].message.tool_calls:
-                        signature = self._tool_call_signature(tool_call.function.name, tool_call.function.arguments)
-                        if signature in successful_tool_calls:
-                            result = self._duplicate_tool_output(
-                                tool_call.function.name,
-                                tool_call.function.arguments,
-                                successful_tool_calls[signature],
-                            )
+                    for tool_call in tool_calls_to_run:
+                        if hasattr(tool_call, "function"):
+                            tool_name = tool_call.function.name
+                            tool_args = tool_call.function.arguments
+                            tool_id = tool_call.id
                         else:
-                            result = self.execute_function(tool_call.function.name, tool_call.function.arguments, user_tokens)
-                            if self._tool_result_success(result):
-                                successful_tool_calls[signature] = result
-                        output = {
-                            "tool_call_id": tool_call.id,
-                            "output": self._json_dumps_safe(result),
-                            "tool_name": tool_call.function.name,
-                            "tool_arguments": tool_call.function.arguments
-                        }
+                            tool_name = tool_call.get("name")
+                            tool_args = tool_call.get("arguments")
+                            tool_id = tool_call.get("id")
+                        try:
+                            signature = self._tool_call_signature(tool_name, tool_args)
+                            if signature in successful_tool_calls:
+                                result = self._duplicate_tool_output(
+                                    tool_name,
+                                    tool_args,
+                                    successful_tool_calls[signature],
+                                )
+                            else:
+                                result = self.execute_function(tool_name, tool_args, user_tokens)
+                                if self._tool_result_success(result):
+                                    successful_tool_calls[signature] = result
+                            output = {
+                                "tool_call_id": tool_id,
+                                "output": self._json_dumps_safe(result),
+                                "tool_name": tool_name,
+                                "tool_arguments": tool_args
+                            }
+                        except Exception as e:
+                            try:
+                                logger.exception("Error executing tool %s", tool_name)
+                            except Exception:
+                                pass
+                            result = {"success": False, "error": str(e)}
+                            output = {
+                                "tool_call_id": tool_id,
+                                "output": self._json_dumps_safe(result),
+                                "tool_name": tool_name,
+                                "tool_arguments": tool_args,
+                            }
                         tool_outputs.append(output)
                         if self.event_listener is not None:
                             self.event_listener(output)
-                        if tool_call.function.name in self.async_tools:
-                            async_tool_names.append(tool_call.function.name)
+                        if tool_name in self.async_tools:
+                            async_tool_names.append(tool_name)
                     compact_outputs = self._compact_tool_outputs_for_context(tool_outputs)
                     tool_image_urls = self._extract_tool_generated_image_urls(tool_outputs)
                     tool_rounds += 1
@@ -2114,6 +2278,7 @@ class Assistant:
             print(completion.choices[0].message)
             raw_response_message = self._content_to_text(completion.choices[0].message.content)
             response_message, think_reasoning = self._strip_think_blocks(raw_response_message)
+            response_message, _legacy_tool_blocks = self._strip_legacy_tool_call_blocks(response_message)
             direct_reasoning = self._extract_reasoning_from_obj(completion.choices[0].message)
             combined_reasoning = self._merge_reasoning_text(direct_reasoning, think_reasoning)
             print(response_message)
@@ -2259,6 +2424,7 @@ class Assistant:
                 result = ""
                 raw_result = ""
                 think_stream_state = {"pending": "", "in_think": False}
+                legacy_tool_stream_state = {"pending": "", "in_tool_call": False}
                 reasoning_chunks = []
                 tool_calls = {}
                 tool_call_ids_by_index = {}
@@ -2299,8 +2465,13 @@ class Assistant:
                                 if reasoning_chunk:
                                     reasoning_chunks.append(reasoning_chunk)
                                 if visible_chunk:
-                                    result += visible_chunk
-                                    yield visible_chunk
+                                    visible_chunk = self._consume_stream_legacy_tool_call_chunk(
+                                        visible_chunk,
+                                        legacy_tool_stream_state,
+                                    )
+                                    if visible_chunk:
+                                        result += visible_chunk
+                                        yield visible_chunk
 
                         delta_tool_calls = getattr(delta, "tool_calls", None) or []
                         for tool_call in delta_tool_calls:
@@ -2331,6 +2502,16 @@ class Assistant:
                         except Exception:
                             pass
                         continue
+
+                legacy_tool_calls = []
+                if not tool_calls:
+                    legacy_tool_calls = self._parse_legacy_tool_calls(raw_result)
+                    for legacy_call in legacy_tool_calls:
+                        call_id = str(legacy_call.get("id") or f"legacy_call_{len(tool_calls)}")
+                        tool_calls[call_id] = {
+                            "name": legacy_call.get("name"),
+                            "arguments": legacy_call.get("arguments") or "{}",
+                        }
 
                 if tool_calls:
                     tool_outputs = []
@@ -2428,6 +2609,14 @@ class Assistant:
                 done = True
 
                 tail_visible, tail_reasoning = self._flush_stream_think_state(think_stream_state)
+                if tail_visible:
+                    tail_visible = self._consume_stream_legacy_tool_call_chunk(
+                        tail_visible,
+                        legacy_tool_stream_state,
+                    )
+                legacy_tail_visible = self._flush_stream_legacy_tool_call_state(legacy_tool_stream_state)
+                if legacy_tail_visible:
+                    tail_visible = (tail_visible or "") + legacy_tail_visible
                 if tail_reasoning:
                     reasoning_chunks.append(tail_reasoning)
                 if tail_visible:
@@ -2435,6 +2624,7 @@ class Assistant:
                     yield tail_visible
 
             cleaned_result, think_reasoning = self._strip_think_blocks(raw_result or result)
+            cleaned_result, _legacy_tool_blocks = self._strip_legacy_tool_call_blocks(cleaned_result)
             if cleaned_result:
                 result = cleaned_result
             combined_reasoning = self._merge_reasoning_text("\n\n".join(reasoning_chunks), think_reasoning)
@@ -2585,25 +2775,37 @@ class Assistant:
             x = json.loads(arguments)
         except Exception as e:
             return "JSON not valid"
-        if function_name == "search_google":
+        normalized_function_name = str(function_name or "").strip()
+        if not normalized_function_name:
+            return {"success": False, "error": "function_name_required"}
+        if normalized_function_name == "search_google":
             return search_google(x["query"])
-        if function_name == "scrape_text":
+        if normalized_function_name == "scrape_text":
             return scrape_text(x["url"], self.search_window)
         other_tool_names = []
         if self.other_tools is not None:
-            other_tool_names = [tool['function']['name'] for tool in self.other_tools]
-            if function_name in other_tool_names:
-                func_to_call = self.other_functions[function_name]
+            other_tool_names = [
+                str(((tool or {}).get('function') or {}).get('name') or '').strip()
+                for tool in self.other_tools
+                if isinstance(tool, dict)
+            ]
+            if normalized_function_name in other_tool_names:
+                func_to_call = self.other_functions.get(normalized_function_name)
+                if func_to_call is None:
+                    return {
+                        "success": False,
+                        "error": f"function_handler_not_found:{normalized_function_name}",
+                    }
                 return func_to_call(x)
-        if self.multiple_configs and '-' in function_name:
-            config_name, actual_function_name = function_name.split('-', 1)
+        if self.multiple_configs and '-' in normalized_function_name:
+            config_name, actual_function_name = normalized_function_name.split('-', 1)
             config = next((cfg for cfg in self.configs if cfg.name == config_name), None)
         else:
-            actual_function_name = function_name
-            config = self.configs[0]
+            actual_function_name = normalized_function_name
+            config = self.configs[0] if self.configs else None
 
         if not config:
-            return "Configuration not found for function: " + function_name
+            return {"success": False, "error": "configuration_not_found", "function_name": normalized_function_name}
 
         arguments = json.loads(arguments)
         is_json = config.is_json
