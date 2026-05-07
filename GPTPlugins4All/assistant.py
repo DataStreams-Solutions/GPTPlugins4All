@@ -251,8 +251,14 @@ except Exception as e:
 
 def scrape_text(url, length):
     import re
+    normalized_url = str(url or "").strip()
+    if normalized_url.lower().startswith("file://"):
+        return (
+            "Error: file:// URLs are not supported by scrape_text. "
+            "Use get_skill/get_master_doc for local guidance files instead."
+        )
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 6.2; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36'}
-    response = requests.get(url, verify=False, headers=headers)
+    response = requests.get(normalized_url, verify=False, headers=headers)
     if not isinstance(length, int):
         length = 3000
     if response.status_code >= 400:
@@ -265,8 +271,8 @@ def scrape_text(url, length):
     content_too_small = len(response_text.strip()) < 100
     
     if content_too_small or not has_links:
-        print(f"Falling back to headless browser for {url} (content_small: {content_too_small}, has_links: {has_links})")
-        playwright_content = _playwright_scrape_subprocess(url)
+        print(f"Falling back to headless browser for {normalized_url} (content_small: {content_too_small}, has_links: {has_links})")
+        playwright_content = _playwright_scrape_subprocess(normalized_url)
         if playwright_content:
             response_text = playwright_content
             print(f"Successfully rendered page with headless browser, content length: {len(response_text)}")
@@ -437,6 +443,7 @@ class Assistant:
         self.context_compact_target_ratio = float(context_compact_target_ratio or 0.58)
         self.context_compact_keep_recent = max(6, int(context_compact_keep_recent or 18))
         self.tool_output_context_max_chars = max(200, int(tool_output_context_max_chars or 1200))
+        self._chat_payload_estimate_seq = 0
         self.other_tools = other_tools or []
         self.other_functions = other_functions or {}
         self.initial_suggestions = initial_suggestions
@@ -592,7 +599,7 @@ class Assistant:
 
     def _image_fallback_model(self):
         override = str(os.getenv("ASSISTANT_IMAGE_FALLBACK_MODEL", "") or "").strip()
-        return override or "gpt-5-mini"
+        return override or "gpt-5.4-nano"
 
     def _get_openai_direct_client(self):
         if self._openai_direct_client is not None:
@@ -962,9 +969,12 @@ class Assistant:
             normalized_tools.append(tool_copy)
         return normalized_tools
 
-    def _normalize_text_for_context(self, text, max_chars=500):
+    def _normalize_text_for_context(self, text, max_chars=500, collapse_whitespace=True):
         raw = str(text or "")
-        raw = re.sub(r"\s+", " ", raw).strip()
+        if collapse_whitespace:
+            raw = re.sub(r"\s+", " ", raw).strip()
+        else:
+            raw = raw.strip()
         if len(raw) > max_chars:
             raw = raw[:max_chars] + "... [truncated]"
         return raw
@@ -1424,6 +1434,11 @@ class Assistant:
         state_summary = []
         open_loops = []
         decision_log = []
+        sticky_rules = []
+        apollo_phone_persist_rule = (
+            "If Apollo enrichment returns phone numbers, immediately persist them to the person/contact record before any next step."
+        )
+        saw_apollo_phone_context = False
         for msg in (messages or [])[-200:]:
             role = str((msg or {}).get("role") or "unknown").strip().lower()
             text = self._normalize_text_for_context(self._content_to_text((msg or {}).get("content")), max_chars=360)
@@ -1434,17 +1449,25 @@ class Assistant:
             if role in {"user", "assistant"}:
                 state_summary.append(f"{role}: {text}")
             lower = text.lower()
+            if (
+                "operator_sync_apollo_people_enrichment" in lower
+                or ("apollo" in lower and ("phone" in lower or "mobile" in lower or "direct dial" in lower))
+            ):
+                saw_apollo_phone_context = True
             if "?" in text or "todo" in lower or "follow up" in lower or "next step" in lower:
                 open_loops.append(text)
             if role == "assistant" and ("i will" in lower or "we will" in lower or "plan:" in lower or "next," in lower):
                 decision_log.append(text)
+        if saw_apollo_phone_context:
+            sticky_rules.append(apollo_phone_persist_rule)
         return (
             state_summary[:24],
             open_loops[:16],
             decision_log[:16],
+            sticky_rules[:8],
         )
 
-    def _render_compaction_message(self, state_summary, open_loops, decision_log, removed_count):
+    def _render_compaction_message(self, state_summary, open_loops, decision_log, sticky_rules, removed_count):
         lines = [
             "[context_compaction_v1]",
             f"compacted_messages: {int(removed_count)}",
@@ -1464,6 +1487,11 @@ class Assistant:
             lines.extend([f"- {x}" for x in decision_log[:12]])
         else:
             lines.append("- (none)")
+        lines.append("sticky_rules:")
+        if sticky_rules:
+            lines.extend([f"- {x}" for x in sticky_rules[:8]])
+        else:
+            lines.append("- (none)")
         lines.append("[/context_compaction_v1]")
         return "\n".join(lines)
 
@@ -1476,6 +1504,10 @@ class Assistant:
                 "before_tokens": meta.get("before_tokens"),
                 "after_tokens": meta.get("after_tokens"),
                 "removed_messages": meta.get("removed_messages"),
+                "reason": meta.get("reason"),
+                "input_tokens": meta.get("input_tokens"),
+                "message_tokens": meta.get("message_tokens"),
+                "tool_schema_tokens": meta.get("tool_schema_tokens"),
             })
         except Exception:
             pass
@@ -1530,13 +1562,14 @@ class Assistant:
             pool = list(removed)
             if existing_summary is not None:
                 pool = [existing_summary] + pool
-            state_summary, open_loops, decision_log = self._extract_compaction_lists(pool)
+            state_summary, open_loops, decision_log, sticky_rules = self._extract_compaction_lists(pool)
             compact_msg = {
                 "role": "system",
                 "content": self._render_compaction_message(
                     state_summary=state_summary,
                     open_loops=open_loops,
                     decision_log=decision_log,
+                    sticky_rules=sticky_rules,
                     removed_count=len(removed),
                 ),
                 "timestamp": datetime.now().isoformat(),
@@ -1554,19 +1587,207 @@ class Assistant:
 
         return messages, None
 
+    def _drop_tool_result_key(self, key):
+        normalized = str(key or "").strip().lower()
+        if not normalized:
+            return True
+        if normalized in {
+            "_run_memory",
+            "_run_memory_hint",
+            "tenant_id",
+            "content_hash",
+            "raw_data",
+            "raw_response",
+            "raw_html",
+            "html",
+            "debug",
+            "trace",
+        }:
+            return True
+        if normalized in {"created_at", "updated_at", "processed_at", "last_manual_targeting_seen_at"}:
+            return True
+        if normalized.startswith("last_") and normalized.endswith("_at"):
+            return True
+        return False
+
+    def _compact_person_payload(self, value):
+        if not isinstance(value, dict):
+            return value
+        keep = (
+            "person_id",
+            "name",
+            "title",
+            "headline",
+            "company_id",
+            "company_name",
+            "email",
+            "phone_number",
+            "linkedin_url",
+            "tracking_stage",
+        )
+        return {
+            key: self._sanitize_tool_result_value(value.get(key), key=key, depth=1)
+            for key in keep
+            if value.get(key) not in (None, "", [], {})
+        }
+
+    def _compact_company_payload(self, value):
+        if not isinstance(value, dict):
+            return value
+        keep = (
+            "company_id",
+            "id",
+            "name",
+            "company_name",
+            "website",
+            "domain",
+            "linkedin_url",
+            "profile_url",
+            "industry",
+            "location",
+            "description",
+        )
+        return {
+            key: self._sanitize_tool_result_value(value.get(key), key=key, depth=1)
+            for key in keep
+            if value.get(key) not in (None, "", [], {})
+        }
+
+    def _sanitize_tool_result_value(self, value, *, key="", depth=0):
+        normalized_key = str(key or "").strip().lower()
+        if self._drop_tool_result_key(normalized_key):
+            return None
+        if depth > 5:
+            return self._normalize_text_for_context(value, max_chars=240, collapse_whitespace=True)
+        if isinstance(value, str):
+            limit = 900
+            if normalized_key in {"description", "summary", "result_summary", "message", "error", "reason"}:
+                limit = max(limit, self.tool_output_context_max_chars)
+            if normalized_key in {"email", "phone_number", "linkedin_url", "website", "url", "profile_url"}:
+                limit = 400
+            return self._normalize_text_for_context(value, max_chars=limit, collapse_whitespace=True)
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        if isinstance(value, list):
+            cap = 8
+            if normalized_key in {"people", "persons", "companies", "signals", "items", "matches"}:
+                cap = 10
+            rows = []
+            for item in value[:cap]:
+                cleaned = self._sanitize_tool_result_value(item, key=normalized_key, depth=depth + 1)
+                if cleaned not in (None, "", [], {}):
+                    rows.append(cleaned)
+            if len(value) > cap:
+                rows.append({"truncated_count": len(value) - cap})
+            return rows
+        if isinstance(value, dict):
+            if normalized_key in {"person", "people", "persons"} and {"person_id", "name"} & set(value.keys()):
+                return self._compact_person_payload(value)
+            if normalized_key in {"company", "companies"} and ({"company_id", "name", "company_name"} & set(value.keys())):
+                return self._compact_company_payload(value)
+            out = {}
+            priority_keys = (
+                "success",
+                "error",
+                "message",
+                "reason",
+                "status",
+                "run_id",
+                "workflow_run_id",
+                "account_id",
+                "company_id",
+                "company_name",
+                "person_id",
+                "dossier_id",
+                "sequence_id",
+                "campaign_id",
+                "workspace_path",
+                "path",
+                "count",
+                "created",
+                "updated",
+                "launched",
+                "skipped",
+                "person",
+                "people",
+                "company",
+                "companies",
+                "signals",
+                "items",
+                "matches",
+                "selected_targets",
+                "rate_limits",
+            )
+            ordered_keys = [k for k in priority_keys if k in value]
+            ordered_keys.extend([k for k in value.keys() if k not in ordered_keys])
+            for child_key in ordered_keys:
+                if len(out) >= 28:
+                    out["truncated_keys"] = max(0, len(value) - len(out))
+                    break
+                if self._drop_tool_result_key(child_key):
+                    continue
+                cleaned = self._sanitize_tool_result_value(value.get(child_key), key=child_key, depth=depth + 1)
+                if cleaned not in (None, "", [], {}):
+                    out[str(child_key)] = cleaned
+            return out
+        return self._normalize_text_for_context(value, max_chars=500, collapse_whitespace=True)
+
+    def _parse_tool_result_for_model(self, output):
+        raw_output = (output or {}).get("output")
+        parsed = raw_output
+        if isinstance(raw_output, str):
+            try:
+                parsed = json.loads(raw_output)
+            except Exception:
+                parsed = raw_output
+        return self._sanitize_tool_result_value(parsed, key="result", depth=0)
+
+    def _model_visible_tool_outputs(self, compact_outputs):
+        rows = []
+        for output in compact_outputs or []:
+            result = (output or {}).get("model_result")
+            if result in (None, "", [], {}):
+                result = (output or {}).get("output")
+            rows.append(
+                {
+                    "tool": str((output or {}).get("tool_name") or "").strip(),
+                    "result": result,
+                }
+            )
+        return rows
+
     def _compact_tool_outputs_for_context(self, tool_outputs):
         compacted = []
         for output in (tool_outputs or []):
             row = dict(output or {})
-            row["output"] = self._normalize_text_for_context(row.get("output"), max_chars=self.tool_output_context_max_chars)
+            tool_name = str(row.get("tool_name") or "").strip().lower()
+            max_chars = self.tool_output_context_max_chars
+            # Apollo enrichment payloads can include contact fields near the tail of
+            # large JSON objects; use a larger context budget so email/phone values
+            # are still available to the model on the follow-up turn.
+            if "apollo" in tool_name and ("enrich" in tool_name or "person" in tool_name or "contact" in tool_name):
+                max_chars = max(max_chars, 12000)
+            model_result = self._parse_tool_result_for_model(row)
+            row["output"] = self._normalize_text_for_context(
+                self._json_dumps_safe(model_result),
+                max_chars=max_chars,
+                collapse_whitespace=False,
+            )
+            row["model_result"] = model_result
             compacted.append(row)
         return compacted
 
-    def _tool_output_followup_hint(self, compact_outputs, *, force_no_more_tools=False):
-        message = (
-            "Tool outputs from most recent attempt: "
-            + self._json_dumps_safe(compact_outputs)
-            + "\nIf the tool output indicates success and already contains the requested result, do not call more tools. "
+    def _tool_output_followup_hint(self, compact_outputs, *, force_no_more_tools=False, include_outputs=True):
+        if include_outputs:
+            message = (
+                "Tool outputs from most recent attempt: "
+                + self._json_dumps_safe(self._model_visible_tool_outputs(compact_outputs))
+                + "\n"
+            )
+        else:
+            message = "Use the preceding tool result messages as the source of truth. "
+        message += (
+            "If the tool output indicates success and already contains the requested result, do not call more tools. "
             + "Answer the user using the latest tool result. Only retry a tool if the output indicates failure or missing required data."
         )
         if force_no_more_tools:
@@ -1669,6 +1890,78 @@ class Assistant:
                 tools_tokens = int(len(str(tools)) / 4)
         return int(msg_tokens + tools_tokens + 32)
 
+    def _estimate_payload_input_parts(self, payload):
+        data = payload or {}
+        msg_tokens = self._estimate_messages_tokens(data.get("messages") or [])
+        tools_tokens = 0
+        tools = data.get("tools") or []
+        model_for_encoding = str(data.get("model") or self.model or "").strip()
+        if tools:
+            try:
+                enc = tiktoken.encoding_for_model(model_for_encoding or self.model)
+            except Exception:
+                enc = encoding
+            try:
+                tools_tokens = len(enc.encode(json.dumps(tools, default=str)))
+            except Exception:
+                tools_tokens = int(len(str(tools)) / 4)
+        return {
+            "message_tokens": int(msg_tokens),
+            "tool_schema_tokens": int(tools_tokens),
+            "input_tokens": int(msg_tokens + tools_tokens + 32),
+        }
+
+    def _estimate_input_cost_usd(self, model, input_tokens):
+        model_name = str(model or self.model or "").lower()
+        if "minimax" in model_name:
+            # MiniMax M2.7 standard input pricing as of 2026-05: $0.30 / 1M input tokens.
+            return round((float(input_tokens or 0) / 1_000_000.0) * 0.30, 6)
+        if "gpt-5" in model_name:
+            return round((float(input_tokens or 0) / 1_000_000.0) * 1.25, 6)
+        return None
+
+    def _emit_chat_payload_estimate(self, payload, *, phase):
+        if not self.event_listener or not isinstance(payload, dict):
+            return
+        try:
+            self._chat_payload_estimate_seq += 1
+            parts = self._estimate_payload_input_parts(payload)
+            model = str(payload.get("model") or self.model or "")
+            event = {
+                "type": "chat_payload_estimate",
+                "phase": str(phase or "chat"),
+                "sequence": self._chat_payload_estimate_seq,
+                "model": model,
+                **parts,
+                "estimated_input_cost_usd": self._estimate_input_cost_usd(model, parts.get("input_tokens")),
+                "message_count": len(payload.get("messages") or []),
+                "tool_count": len(payload.get("tools") or []),
+            }
+            self.event_listener(event)
+        except Exception:
+            pass
+
+    def _maybe_compact_payload_messages(self, payload, *, reason="proactive"):
+        if not isinstance(payload, dict) or not self.enable_context_compaction:
+            return None
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            return None
+        tool_schema_text = ""
+        if payload.get("tools"):
+            tool_schema_text = "\n[tool_schema_for_budget]\n" + self._json_dumps_safe(payload.get("tools"))
+        compacted_messages, compact_meta = self._maybe_compact_messages(
+            messages,
+            additional_context=tool_schema_text,
+        )
+        if not compact_meta:
+            return None
+        payload["messages"] = compacted_messages
+        compact_meta["reason"] = reason
+        compact_meta.update(self._estimate_payload_input_parts(payload))
+        self._emit_compaction_event(compact_meta)
+        return compact_meta
+
     def _apply_proactive_output_cap(self, payload):
         model_name = str((payload or {}).get("model") or self.model or "").lower()
         if "gpt-5" not in model_name:
@@ -1724,13 +2017,14 @@ class Assistant:
 
         removed = body[:-keep_recent]
         preserved = body[-keep_recent:]
-        state_summary, open_loops, decision_log = self._extract_compaction_lists(removed)
+        state_summary, open_loops, decision_log, sticky_rules = self._extract_compaction_lists(removed)
         compact_msg = {
             "role": "system",
             "content": self._render_compaction_message(
                 state_summary=state_summary,
                 open_loops=open_loops,
                 decision_log=decision_log,
+                sticky_rules=sticky_rules,
                 removed_count=len(removed),
             ),
             "timestamp": datetime.now().isoformat(),
@@ -1785,13 +2079,16 @@ class Assistant:
         attempts = self._context_error_max_retries()
         if not isinstance(payload, dict):
             payload = {}
+        self._maybe_compact_payload_messages(payload, reason="before_chat_completion")
         self._apply_proactive_output_cap(payload)
 
         last_error = None
         for _ in range(attempts):
             try:
                 chat_client = self._ensure_image_model_compatibility(payload)
+                self._maybe_compact_payload_messages(payload, reason="retry_or_followup")
                 self._apply_proactive_output_cap(payload)
+                self._emit_chat_payload_estimate(payload, phase="chat_completion")
                 return chat_client.chat.completions.create(**self._prepare_chat_payload(payload))
             except Exception as e:
                 last_error = e
@@ -1991,7 +2288,7 @@ class Assistant:
                     }
                 }
             })
-        if self.view_pages:
+        if self.view_pages and self.search_enabled:
             tools.append({
                 "type": "function",
                 "function": {
@@ -2073,7 +2370,7 @@ class Assistant:
         else:
             return config.generate_tools_representation()
 
-    def handle_old_mode(self, user_message, image_paths=None, user_tokens=None, message_id=None):
+    def handle_old_mode(self, user_message, image_paths=None, user_tokens=None, message_id=None, files=None):
         if self.thread_id is None:
             self.thread_id = str(uuid.uuid4())
         print('not streaming')
@@ -2098,7 +2395,33 @@ class Assistant:
                 if source_url and source_url != display_url:
                     image_part["source_url"] = source_url
                 content.append(image_part)
+        file_rows = []
+        for raw_file in files or []:
+            if isinstance(raw_file, dict):
+                file_url = str(
+                    raw_file.get("url")
+                    or raw_file.get("file_url")
+                    or raw_file.get("href")
+                    or ""
+                ).strip()
+                file_name = str(
+                    raw_file.get("name")
+                    or raw_file.get("filename")
+                    or raw_file.get("title")
+                    or ""
+                ).strip()
+            else:
+                file_url = str(raw_file or "").strip()
+                file_name = ""
+            if not file_url:
+                continue
+            entry = {"url": file_url}
+            if file_name:
+                entry["name"] = file_name
+            file_rows.append(entry)
         msg = {"role": "user", "content": content, "timestamp": datetime.now().isoformat()}
+        if file_rows:
+            msg["files"] = file_rows
         if message_id is not None:
             msg["message_id"] = message_id
         thread["messages"].append(msg)
@@ -2144,7 +2467,7 @@ class Assistant:
                     }
                 }
             })
-        if self.view_pages:
+        if self.view_pages and self.search_enabled:
             tools.append({
                 "type": "function",
                 "function": {
@@ -2263,7 +2586,10 @@ class Assistant:
                     tool_rounds += 1
                     force_no_more_tools = tool_rounds >= self._max_tool_rounds()
                     data_['messages'] = data_['messages'] + [{"role": "system", "content": self._tool_output_followup_hint(compact_outputs, force_no_more_tools=force_no_more_tools)}]
-                    thread["messages"].append({"role": "system", "content": "Tool outputs from most recent attempt: " + self._json_dumps_safe(compact_outputs)})
+                    thread["messages"].append({
+                        "role": "system",
+                        "content": self._tool_output_followup_hint(compact_outputs, force_no_more_tools=force_no_more_tools),
+                    })
                     image_msg = self._tool_image_context_message(tool_image_urls)
                     if image_msg:
                         data_["messages"].append(image_msg)
@@ -2308,7 +2634,7 @@ class Assistant:
             print(e)
             return "Error "+str(e)
 
-    def handle_old_mode_streaming(self, user_message, image_paths=None, user_tokens=None):
+    def handle_old_mode_streaming(self, user_message, image_paths=None, user_tokens=None, files=None):
         if self.thread_id is None:
             self.thread_id = str(uuid.uuid4())
         thread = self.get_thread(self.thread_id)
@@ -2331,8 +2657,35 @@ class Assistant:
                 if source_url and source_url != display_url:
                     image_part["source_url"] = source_url
                 content.append(image_part)
+        file_rows = []
+        for raw_file in files or []:
+            if isinstance(raw_file, dict):
+                file_url = str(
+                    raw_file.get("url")
+                    or raw_file.get("file_url")
+                    or raw_file.get("href")
+                    or ""
+                ).strip()
+                file_name = str(
+                    raw_file.get("name")
+                    or raw_file.get("filename")
+                    or raw_file.get("title")
+                    or ""
+                ).strip()
+            else:
+                file_url = str(raw_file or "").strip()
+                file_name = ""
+            if not file_url:
+                continue
+            entry = {"url": file_url}
+            if file_name:
+                entry["name"] = file_name
+            file_rows.append(entry)
         timestamp = datetime.now().isoformat()
-        thread["messages"].append({"role": "user", "content": content, "timestamp": timestamp})
+        user_row = {"role": "user", "content": content, "timestamp": timestamp}
+        if file_rows:
+            user_row["files"] = file_rows
+        thread["messages"].append(user_row)
         try:
             self.put_thread(self.thread_id, thread["messages"])
         except Exception:
@@ -2379,7 +2732,7 @@ class Assistant:
                     }
                 }
             })
-        if self.view_pages:
+        if self.view_pages and self.search_enabled:
             tools.append({
                 "type": "function",
                 "function": {
@@ -2587,10 +2940,17 @@ class Assistant:
                     force_no_more_tools = tool_rounds >= self._max_tool_rounds()
                     data_['messages'].append({
                         "role": "system",
-                        "content": self._tool_output_followup_hint(compact_outputs, force_no_more_tools=force_no_more_tools),
+                        "content": self._tool_output_followup_hint(
+                            compact_outputs,
+                            force_no_more_tools=force_no_more_tools,
+                            include_outputs=False,
+                        ),
                     })
                     try:
-                        thread["messages"].append({"role": "system", "content": "Tool outputs from most recent attempt: " + self._json_dumps_safe(compact_outputs)})
+                        thread["messages"].append({
+                            "role": "system",
+                            "content": self._tool_output_followup_hint(compact_outputs, force_no_more_tools=force_no_more_tools),
+                        })
                         self.put_thread(self.thread_id, thread["messages"])
                     except Exception:
                         pass
@@ -2671,8 +3031,8 @@ class Assistant:
     def get_assistant_response(self, message, files=None, image_paths=None, user_tokens=None, message_id=None, store_mid=None):
         if self.old_mode:
             if self.streaming:
-                return self.handle_old_mode_streaming(message, image_paths=image_paths, user_tokens=user_tokens)
-            return self.handle_old_mode(message, image_paths=image_paths, user_tokens=user_tokens, message_id=message_id)
+                return self.handle_old_mode_streaming(message, image_paths=image_paths, user_tokens=user_tokens, files=files)
+            return self.handle_old_mode(message, image_paths=image_paths, user_tokens=user_tokens, message_id=message_id, files=files)
         
         attachments = []
         if files is not None:
@@ -2781,7 +3141,46 @@ class Assistant:
         if normalized_function_name == "search_google":
             return search_google(x["query"])
         if normalized_function_name == "scrape_text":
-            return scrape_text(x["url"], self.search_window)
+            target_url = (
+                x.get("url")
+                or x.get("link")
+                or x.get("source_url")
+                or x.get("href")
+                or ""
+            )
+            if not str(target_url or "").strip():
+                return {"success": False, "error": "url_required", "message": "scrape_text requires a url"}
+            return scrape_text(str(target_url).strip(), self.search_window)
+        def _local_function_candidates(name):
+            candidates = []
+
+            def _add(candidate):
+                normalized = str(candidate or "").strip()
+                if normalized and normalized not in candidates:
+                    candidates.append(normalized)
+
+            normalized_name = str(name or "").strip()
+            _add(normalized_name)
+            if normalized_name.startswith("operator_"):
+                _add(normalized_name[len("operator_"):])
+            else:
+                _add(f"operator_{normalized_name}")
+
+            route_match = re.match(
+                r"^(?P<base>.+?)_route_(?P<method>get|post|put|patch|delete|head|options)$",
+                normalized_name,
+                flags=re.IGNORECASE,
+            )
+            if route_match:
+                route_base = str(route_match.group("base") or "").strip()
+                _add(route_base)
+                if route_base.startswith("operator_"):
+                    _add(route_base[len("operator_"):])
+                else:
+                    _add(f"operator_{route_base}")
+            return candidates
+
+        available_other_functions = self.other_functions if isinstance(self.other_functions, dict) else {}
         other_tool_names = []
         if self.other_tools is not None:
             other_tool_names = [
@@ -2790,12 +3189,16 @@ class Assistant:
                 if isinstance(tool, dict)
             ]
             if normalized_function_name in other_tool_names:
-                func_to_call = self.other_functions.get(normalized_function_name)
-                if func_to_call is None:
+                func_to_call = available_other_functions.get(normalized_function_name)
+                if not callable(func_to_call):
                     return {
                         "success": False,
                         "error": f"function_handler_not_found:{normalized_function_name}",
                     }
+                return func_to_call(x)
+        for candidate_name in _local_function_candidates(normalized_function_name):
+            func_to_call = available_other_functions.get(candidate_name)
+            if callable(func_to_call):
                 return func_to_call(x)
         if self.multiple_configs and '-' in normalized_function_name:
             config_name, actual_function_name = normalized_function_name.split('-', 1)
@@ -2805,9 +3208,15 @@ class Assistant:
             config = self.configs[0] if self.configs else None
 
         if not config:
-            return {"success": False, "error": "configuration_not_found", "function_name": normalized_function_name}
+            return {
+                "success": False,
+                "error": "function_not_found",
+                "function_name": normalized_function_name,
+                "tried_local_names": _local_function_candidates(normalized_function_name),
+                "configured_api_count": len(self.configs or []),
+            }
 
-        arguments = json.loads(arguments)
+        arguments = x
         is_json = config.is_json
         print(config.name)
         print(actual_function_name)

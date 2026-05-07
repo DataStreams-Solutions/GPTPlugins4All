@@ -166,3 +166,105 @@ def test_minimax_defaults_to_higher_tool_round_budget(monkeypatch):
     monkeypatch.delenv("ASSISTANT_MAX_TOOL_ROUNDS_MINIMAX", raising=False)
     monkeypatch.delenv("ASSISTANT_MAX_TOOL_ROUNDS_DEFAULT", raising=False)
     assert assistant._max_tool_rounds() == 80
+
+def test_tool_output_context_strips_transport_and_run_memory_noise():
+    assistant = object.__new__(Assistant)
+    assistant.tool_output_context_max_chars = 1200
+    noisy = {
+        "success": True,
+        "person_id": "linkedin_123",
+        "person": {
+            "tenant_id": "orgl",
+            "person_id": "linkedin_123",
+            "company_id": "18914703",
+            "company_name": "DataStreams Solutions",
+            "created_at": "2026-05-05T13:10:14.566632",
+            "email": "trevor@datastreamssolutions.com",
+            "headline": "Founder/CEO DataStreams Solutions",
+            "last_manual_targeting_seen_at": "2026-05-05T13:10:14.536057",
+            "linkedin_url": "https://www.linkedin.com/in/trevor-martin-86567859",
+            "name": "Trevor Martin",
+            "phone_number": "+1 262-404-7897",
+            "provider_id": "5ae95a3ea6da98eae4e2bef7",
+            "source": "manual_targeting_discovery",
+            "title": "Founder/CEO",
+            "tracking_stage": "discovered",
+            "updated_at": "2026-05-05T13:13:14.089211",
+        },
+        "_run_memory": {
+            "run_id": "run_chat_123",
+            "paths": {"ledger": "agent_runs/run_chat_123/ledger.jsonl"},
+            "next_action": "Resolve tool failure: account_not_allowed",
+        },
+    }
+
+    compacted = assistant._compact_tool_outputs_for_context([
+        {
+            "tool_call_id": "call_abc",
+            "tool_name": "update_person",
+            "tool_arguments": '{"person_id":"linkedin_123"}',
+            "output": assistant._json_dumps_safe(noisy),
+        }
+    ])
+    visible = assistant._model_visible_tool_outputs(compacted)
+    rendered = assistant._tool_output_followup_hint(compacted)
+
+    assert visible == [
+        {
+            "tool": "update_person",
+            "result": {
+                "success": True,
+                "person_id": "linkedin_123",
+                "person": {
+                    "person_id": "linkedin_123",
+                    "name": "Trevor Martin",
+                    "title": "Founder/CEO",
+                    "headline": "Founder/CEO DataStreams Solutions",
+                    "company_id": "18914703",
+                    "company_name": "DataStreams Solutions",
+                    "email": "trevor@datastreamssolutions.com",
+                    "phone_number": "+1 262-404-7897",
+                    "linkedin_url": "https://www.linkedin.com/in/trevor-martin-86567859",
+                    "tracking_stage": "discovered",
+                },
+            },
+        }
+    ]
+    assert "tool_call_id" not in rendered
+    assert "tool_arguments" not in rendered
+    assert "_run_memory" not in rendered
+    assert "last_manual_targeting_seen_at" not in rendered
+    assert "tenant_id" not in rendered
+    assert "ledger.jsonl" not in rendered
+
+
+def test_payload_estimate_emits_tool_schema_tokens():
+    events = []
+    assistant = object.__new__(Assistant)
+    assistant.model = "MiniMax-M2.7"
+    assistant.event_listener = lambda row: events.append(dict(row or {}))
+    assistant._chat_payload_estimate_seq = 0
+
+    payload = {
+        "model": "MiniMax-M2.7",
+        "messages": [{"role": "system", "content": "hello"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "dummy_tool",
+                    "description": "A dummy tool",
+                    "parameters": {"type": "object", "properties": {"x": {"type": "string"}}},
+                },
+            }
+        ],
+    }
+
+    assistant._emit_chat_payload_estimate(payload, phase="unit")
+
+    assert events
+    event = events[0]
+    assert event["type"] == "chat_payload_estimate"
+    assert event["input_tokens"] > event["message_tokens"]
+    assert event["tool_schema_tokens"] > 0
+    assert event["estimated_input_cost_usd"] > 0
