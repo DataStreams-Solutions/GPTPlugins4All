@@ -23,7 +23,6 @@ def _make_assistant(monkeypatch, *, streaming: bool = False) -> tuple[Assistant,
         model="MiniMax-M2.5",
         thread_id="thread-test",
         openai_key="test-key",
-        embedding_key="embedding-key",
         base_url="https://api.minimaxi.chat/v1",
         old_mode=True,
         streaming=streaming,
@@ -269,24 +268,3 @@ def test_payload_estimate_emits_tool_schema_tokens():
     assert event["input_tokens"] > event["message_tokens"]
     assert event["tool_schema_tokens"] > 0
     assert event["estimated_input_cost_usd"] > 0
-
-
-def test_max_tool_rounds_can_be_set_per_assistant(monkeypatch):
-    assistant, _executed, _events = _make_assistant(monkeypatch, streaming=False)
-    assert assistant._max_tool_rounds() == 80
-
-    capped = Assistant(
-        configs=[],
-        name="capped",
-        instructions="Test assistant",
-        model="MiniMax-M2.7",
-        thread_id="thread-test",
-        openai_key="test-key",
-        embedding_key="embedding-key",
-        base_url="https://api.minimaxi.chat/v1",
-        old_mode=True,
-        max_tool_rounds=24,
-        get_thread=lambda _thread_id: {"messages": []},
-        put_thread=lambda _thread_id, _messages: None,
-    )
-    assert capped._max_tool_rounds() == 24

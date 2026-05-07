@@ -402,7 +402,7 @@ def generate_function_name(api_call):
     return function_name
 
 class Assistant:
-    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None, suggest_responses=False, api_calls=[], sources=None, initial_suggestions=None, mcp_servers=None, emit_tool_preamble=True, stop_check=None, async_tools=None, chat_completion_defaults=None, enable_context_compaction=False, context_budget_tokens=None, context_compact_threshold_ratio=0.82, context_compact_target_ratio=0.58, context_compact_keep_recent=18, tool_output_context_max_chars=1200, max_tool_rounds=None, embedding_base_url=None, resolve_image_url=None):
+    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None, suggest_responses=False, api_calls=[], sources=None, initial_suggestions=None, mcp_servers=None, emit_tool_preamble=True, stop_check=None, async_tools=None, chat_completion_defaults=None, enable_context_compaction=False, context_budget_tokens=None, context_compact_threshold_ratio=0.82, context_compact_target_ratio=0.58, context_compact_keep_recent=18, tool_output_context_max_chars=1200, embedding_base_url=None, resolve_image_url=None):
         try:
             from openai import OpenAI
         except ImportError:
@@ -443,7 +443,6 @@ class Assistant:
         self.context_compact_target_ratio = float(context_compact_target_ratio or 0.58)
         self.context_compact_keep_recent = max(6, int(context_compact_keep_recent or 18))
         self.tool_output_context_max_chars = max(200, int(tool_output_context_max_chars or 1200))
-        self.max_tool_rounds = max(1, int(max_tool_rounds)) if str(max_tool_rounds or "").strip() else None
         self._chat_payload_estimate_seq = 0
         self.other_tools = other_tools or []
         self.other_functions = other_functions or {}
@@ -1809,8 +1808,6 @@ class Assistant:
             return int(default)
 
     def _max_tool_rounds(self):
-        if self.max_tool_rounds is not None:
-            return max(1, int(self.max_tool_rounds))
         explicit = self._safe_int_env("ASSISTANT_MAX_TOOL_ROUNDS", 0)
         if explicit > 0:
             return max(1, explicit)
