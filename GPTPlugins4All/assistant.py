@@ -402,7 +402,7 @@ def generate_function_name(api_call):
     return function_name
 
 class Assistant:
-    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None, suggest_responses=False, api_calls=[], sources=None, initial_suggestions=None, mcp_servers=None, emit_tool_preamble=True, stop_check=None, async_tools=None, chat_completion_defaults=None, enable_context_compaction=False, context_budget_tokens=None, context_compact_threshold_ratio=0.82, context_compact_target_ratio=0.58, context_compact_keep_recent=18, tool_output_context_max_chars=1200, embedding_base_url=None, resolve_image_url=None):
+    def __init__(self, configs, name, instructions, model, assistant_id=None, thread_id=None, embedding_key=None,event_listener=None, openai_key=None, files=None, code_interpreter=False, retrieval=False, is_json=None, old_mode=False, max_tokens=None, bot_intro=None, get_thread=None, put_thread=None, save_memory=None, query_memory=None, max_messages=4, raw_mode=False, streaming=False, has_file=False, file_identifier=None, read_file=None, search_enabled=False, view_pages=False, search_window=1000, other_tools=None, other_functions={}, embedding_model=None, base_url=None, suggest_responses=False, api_calls=[], sources=None, initial_suggestions=None, mcp_servers=None, emit_tool_preamble=True, stop_check=None, async_tools=None, chat_completion_defaults=None, enable_context_compaction=False, context_budget_tokens=None, context_compact_threshold_ratio=0.82, context_compact_target_ratio=0.58, context_compact_keep_recent=18, tool_output_context_max_chars=1200, embedding_base_url=None, resolve_image_url=None, provider_name=None, usage_cost_estimator=None):
         try:
             from openai import OpenAI
         except ImportError:
@@ -444,6 +444,9 @@ class Assistant:
         self.context_compact_keep_recent = max(6, int(context_compact_keep_recent or 18))
         self.tool_output_context_max_chars = max(200, int(tool_output_context_max_chars or 1200))
         self._chat_payload_estimate_seq = 0
+        self._chat_usage_seq = 0
+        self.provider_name = str(provider_name or "").strip().lower()
+        self.usage_cost_estimator = usage_cost_estimator
         self.other_tools = other_tools or []
         self.other_functions = other_functions or {}
         self.initial_suggestions = initial_suggestions
@@ -599,7 +602,7 @@ class Assistant:
 
     def _image_fallback_model(self):
         override = str(os.getenv("ASSISTANT_IMAGE_FALLBACK_MODEL", "") or "").strip()
-        return override or "gpt-5.4-nano"
+        return override or "gpt-5.6-luna"
 
     def _get_openai_direct_client(self):
         if self._openai_direct_client is not None:
@@ -1914,10 +1917,19 @@ class Assistant:
     def _estimate_input_cost_usd(self, model, input_tokens):
         model_name = str(model or self.model or "").lower()
         if "minimax" in model_name:
-            # MiniMax M2.7 standard input pricing as of 2026-05: $0.30 / 1M input tokens.
             return round((float(input_tokens or 0) / 1_000_000.0) * 0.30, 6)
-        if "gpt-5" in model_name:
-            return round((float(input_tokens or 0) / 1_000_000.0) * 1.25, 6)
+        if "deepseek-v4-flash" in model_name:
+            rate = 0.0826 if "deepseek/" in model_name else 0.14
+            return round((float(input_tokens or 0) / 1_000_000.0) * rate, 6)
+        if "deepseek-v4-pro" in model_name:
+            rate = 1.32 if "deepseek/" in model_name else 0.435
+            return round((float(input_tokens or 0) / 1_000_000.0) * rate, 6)
+        if "gpt-5.6-luna" in model_name:
+            return round((float(input_tokens or 0) / 1_000_000.0) * 0.20, 6)
+        if "gpt-5.6-terra" in model_name:
+            return round((float(input_tokens or 0) / 1_000_000.0) * 2.00, 6)
+        if "gpt-5.6-sol" in model_name:
+            return round((float(input_tokens or 0) / 1_000_000.0) * 5.00, 6)
         return None
 
     def _emit_chat_payload_estimate(self, payload, *, phase):
@@ -1940,6 +1952,113 @@ class Assistant:
             self.event_listener(event)
         except Exception:
             pass
+
+    def _usage_mapping(self, value):
+        if isinstance(value, dict):
+            return value
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            try:
+                mapped = model_dump()
+                if isinstance(mapped, dict):
+                    return mapped
+            except Exception:
+                pass
+        to_dict = getattr(value, "to_dict", None)
+        if callable(to_dict):
+            try:
+                mapped = to_dict()
+                if isinstance(mapped, dict):
+                    return mapped
+            except Exception:
+                pass
+        raw = getattr(value, "__dict__", None)
+        return raw if isinstance(raw, dict) else {}
+
+    def _usage_nonnegative_int(self, value):
+        try:
+            return max(0, int(value or 0))
+        except Exception:
+            return 0
+
+    def _emit_chat_usage(self, completion_or_usage, *, phase="chat_completion"):
+        if not self.event_listener or completion_or_usage is None:
+            return None
+        usage = getattr(completion_or_usage, "usage", None)
+        if usage is None:
+            usage = completion_or_usage
+        raw = self._usage_mapping(usage)
+        if not raw:
+            return None
+        prompt_details = self._usage_mapping(
+            raw.get("prompt_tokens_details") or raw.get("input_tokens_details")
+        )
+        completion_details = self._usage_mapping(
+            raw.get("completion_tokens_details") or raw.get("output_tokens_details")
+        )
+        event = {
+            "type": "chat_completion_usage",
+            "phase": str(phase or "chat_completion"),
+            "provider": self.provider_name or "unknown",
+            "model": str(self.model or ""),
+            "input_tokens": self._usage_nonnegative_int(
+                raw.get("prompt_tokens", raw.get("input_tokens"))
+            ),
+            "cached_input_tokens": self._usage_nonnegative_int(
+                prompt_details.get(
+                    "cached_tokens",
+                    raw.get("cache_read_input_tokens", raw.get("cached_input_tokens")),
+                )
+            ),
+            "cache_write_input_tokens": self._usage_nonnegative_int(
+                prompt_details.get(
+                    "cache_write_tokens",
+                    prompt_details.get(
+                        "cache_creation_tokens",
+                        raw.get("cache_creation_input_tokens", raw.get("cache_write_input_tokens")),
+                    ),
+                )
+            ),
+            "output_tokens": self._usage_nonnegative_int(
+                raw.get("completion_tokens", raw.get("output_tokens"))
+            ),
+            "reasoning_tokens": self._usage_nonnegative_int(
+                completion_details.get("reasoning_tokens", raw.get("reasoning_tokens"))
+            ),
+        }
+        if not any(
+            event.get(key)
+            for key in (
+                "input_tokens",
+                "cached_input_tokens",
+                "cache_write_input_tokens",
+                "output_tokens",
+                "reasoning_tokens",
+            )
+        ):
+            return None
+        self._chat_usage_seq += 1
+        event["sequence"] = self._chat_usage_seq
+        if callable(self.usage_cost_estimator):
+            try:
+                cost_result = self.usage_cost_estimator(event["model"], dict(event))
+                if isinstance(cost_result, dict):
+                    event.update({
+                        key: value
+                        for key, value in cost_result.items()
+                        if key not in {"type", "provider", "model", "sequence"}
+                    })
+                    if "total_cost_usd" in cost_result and "cost_usd" not in event:
+                        event["cost_usd"] = cost_result.get("total_cost_usd")
+                elif cost_result is not None:
+                    event["cost_usd"] = float(cost_result)
+            except Exception:
+                pass
+        try:
+            self.event_listener(event)
+            return event
+        except Exception:
+            return None
 
     def _maybe_compact_payload_messages(self, payload, *, reason="proactive"):
         if not isinstance(payload, dict) or not self.enable_context_compaction:
@@ -2089,7 +2208,12 @@ class Assistant:
                 self._maybe_compact_payload_messages(payload, reason="retry_or_followup")
                 self._apply_proactive_output_cap(payload)
                 self._emit_chat_payload_estimate(payload, phase="chat_completion")
-                return chat_client.chat.completions.create(**self._prepare_chat_payload(payload))
+                completion = chat_client.chat.completions.create(**self._prepare_chat_payload(payload))
+                # Non-streaming responses expose usage immediately. Streaming
+                # responses emit usage on the terminal chunk while consumed.
+                if not bool(payload.get("stream")):
+                    self._emit_chat_usage(completion, phase="chat_completion")
+                return completion
             except Exception as e:
                 last_error = e
                 err_text = str(e or "")
@@ -2787,6 +2911,11 @@ class Assistant:
                     if self.stop_check and self.stop_check():
                         return
                     try:
+                        if getattr(response_chunk, "usage", None) is not None:
+                            self._emit_chat_usage(
+                                response_chunk,
+                                phase="chat_completion_stream",
+                            )
                         choices = getattr(response_chunk, "choices", None) or []
                         if not choices:
                             continue
