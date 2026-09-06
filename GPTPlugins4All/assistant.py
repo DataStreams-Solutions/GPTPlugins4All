@@ -1981,7 +1981,7 @@ class Assistant:
         except Exception:
             return 0
 
-    def _emit_chat_usage(self, completion_or_usage, *, phase="chat_completion"):
+    def _emit_chat_usage(self, completion_or_usage, *, phase="chat_completion", model=None):
         if not self.event_listener or completion_or_usage is None:
             return None
         usage = getattr(completion_or_usage, "usage", None)
@@ -1996,11 +1996,12 @@ class Assistant:
         completion_details = self._usage_mapping(
             raw.get("completion_tokens_details") or raw.get("output_tokens_details")
         )
+        event_model = getattr(completion_or_usage, "model", None) or model or self.model
         event = {
             "type": "chat_completion_usage",
             "phase": str(phase or "chat_completion"),
             "provider": self.provider_name or "unknown",
-            "model": str(self.model or ""),
+            "model": str(event_model or ""),
             "input_tokens": self._usage_nonnegative_int(
                 raw.get("prompt_tokens", raw.get("input_tokens"))
             ),
@@ -2212,7 +2213,11 @@ class Assistant:
                 # Non-streaming responses expose usage immediately. Streaming
                 # responses emit usage on the terminal chunk while consumed.
                 if not bool(payload.get("stream")):
-                    self._emit_chat_usage(completion, phase="chat_completion")
+                    self._emit_chat_usage(
+                        completion,
+                        phase="chat_completion",
+                        model=payload.get("model"),
+                    )
                 return completion
             except Exception as e:
                 last_error = e
@@ -2915,6 +2920,7 @@ class Assistant:
                             self._emit_chat_usage(
                                 response_chunk,
                                 phase="chat_completion_stream",
+                                model=data_.get("model"),
                             )
                         choices = getattr(response_chunk, "choices", None) or []
                         if not choices:
