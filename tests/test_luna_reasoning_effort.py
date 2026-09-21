@@ -95,3 +95,18 @@ def test_luna_streaming_followup_with_function_tools_forces_none():
 
     assert prepared["stream"] is True
     assert prepared["reasoning_effort"] == "none"
+
+
+def test_non_streaming_drops_stream_options_from_shared_defaults():
+    payload = _payload("gpt-5.6-luna", tools=[FUNCTION_TOOL])
+    payload["stream_options"] = {"include_usage": True}
+    prepared = _assistant()._prepare_chat_payload(payload)
+    assert "stream_options" not in prepared
+    assert payload["stream_options"] == {"include_usage": True}
+
+
+def test_streaming_preserves_usage_options():
+    payload = _payload("gpt-5.6-luna", tools=[FUNCTION_TOOL])
+    payload.update(stream=True, stream_options={"include_usage": True})
+    prepared = _assistant()._prepare_chat_payload(payload)
+    assert prepared["stream_options"] == {"include_usage": True}

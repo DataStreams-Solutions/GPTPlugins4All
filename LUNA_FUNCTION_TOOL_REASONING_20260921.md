@@ -19,3 +19,13 @@ and requests for other models retain their existing payload values.
 Regression coverage checks omitted/default values, non-`"none"` overrides, the
 OpenAI model alias, no-tool requests, non-function tools, other models, and a
 streaming tool follow-up payload.
+
+## Non-streaming defaults discovered during live verification
+
+The backend's shared defaults include `stream_options={"include_usage": true}`.
+OpenAI rejects that parameter when the legacy caller does not enable `stream`;
+the OpenRouter smoke also returned intermittent unusable responses with that
+request shape. The payload boundary now omits stream options on non-streaming
+requests and preserves them for streaming requests. Two regression cases cover
+both branches and confirm the caller's input is not mutated. The new regression
+failed before the guard was added. Full library suite: 24 passed, 3 skipped.

@@ -711,6 +711,10 @@ class Assistant:
 
     def _prepare_chat_payload(self, data):
         payload = copy.deepcopy(data or {})
+        # Shared runtime defaults may enable streaming usage collection even
+        # when this particular request is not streamed.
+        if not payload.get("stream"):
+            payload.pop("stream_options", None)
         payload_messages = payload.get("messages") or []
         sanitized_messages = []
         for msg in payload_messages:
