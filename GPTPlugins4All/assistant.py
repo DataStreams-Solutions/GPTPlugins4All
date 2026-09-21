@@ -727,6 +727,15 @@ class Assistant:
             payload.get("messages") or [],
         )
 
+        model_name = str(payload.get("model") or self.model or "").strip().lower()
+        has_function_tools = any(
+            isinstance(tool, dict)
+            and str(tool.get("type") or "").strip().lower() == "function"
+            for tool in (payload.get("tools") or [])
+        )
+        if model_name in {"gpt-5.6-luna", "openai/gpt-5.6-luna"} and has_function_tools:
+            payload["reasoning_effort"] = "none"
+
         if not payload.get("tools"):
             payload.pop("tools", None)
             payload.pop("tool_choice", None)
