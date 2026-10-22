@@ -1,0 +1,5 @@
+[env]
+OMX_DEFAULT_FRONTIER_MODEL = "gpt-6-luna"
+
+[agents]
+default_subagent_model = "gpt-6-luna"

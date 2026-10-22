@@ -13,4 +13,7 @@ Validation: 14 local tests passed, including parameter and cost regression
 checks. A live synthetic function-tool roundtrip returned `SMOKE_OK`. The
 Python 3.11 pull-request test job passed for commit `2443b52`.
 
+This nested repository sets its Codex child-agent default to GPT-6 Luna and
+overrides the older user-level OMX model guidance when opened on its own.
+
 Price source: [OpenAI GPT-6 Luna](https://developers.openai.com/api/docs/models/gpt-6-luna).
