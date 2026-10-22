@@ -513,7 +513,7 @@ class Assistant:
             self.put_thread = put_thread
             self.max_tokens = None
             self.max_completion_tokens = None
-            if 'gpt-5' in model.lower():
+            if any(version in model.lower() for version in ('gpt-5', 'gpt-6')):
                 self.max_completion_tokens = max_tokens
             else:
                 self.max_tokens = max_tokens
@@ -551,7 +551,7 @@ class Assistant:
         """Helper method to build chat completion data with correct token parameter"""
         data = copy.deepcopy(self.chat_completion_defaults)
         data.update(base_data)
-        if 'gpt-5' in self.model.lower():
+        if any(version in self.model.lower() for version in ('gpt-5', 'gpt-6')):
             if self.max_completion_tokens is not None:
                 data["max_completion_tokens"] = self.max_completion_tokens
         else:
@@ -602,7 +602,7 @@ class Assistant:
 
     def _image_fallback_model(self):
         override = str(os.getenv("ASSISTANT_IMAGE_FALLBACK_MODEL", "") or "").strip()
-        return override or "gpt-5.6-luna"
+        return override or "gpt-6-luna"
 
     def _get_openai_direct_client(self):
         if self._openai_direct_client is not None:
@@ -641,7 +641,7 @@ class Assistant:
             )
 
         payload["model"] = fallback_model
-        if "gpt-5" in fallback_model.lower():
+        if any(version in fallback_model.lower() for version in ("gpt-5", "gpt-6")):
             if payload.get("max_completion_tokens") is None and payload.get("max_tokens") is not None:
                 payload["max_completion_tokens"] = payload.get("max_tokens")
             payload.pop("max_tokens", None)
@@ -737,7 +737,7 @@ class Assistant:
             and str(tool.get("type") or "").strip().lower() == "function"
             for tool in (payload.get("tools") or [])
         )
-        if model_name in {"gpt-5.6-luna", "openai/gpt-5.6-luna"} and has_function_tools:
+        if model_name in {"gpt-5.6-luna", "openai/gpt-5.6-luna", "gpt-6-luna", "openai/gpt-6-luna"} and has_function_tools:
             payload["reasoning_effort"] = "none"
 
         if not payload.get("tools"):
@@ -1937,6 +1937,8 @@ class Assistant:
         if "deepseek-v4-pro" in model_name:
             rate = 1.32 if "deepseek/" in model_name else 0.435
             return round((float(input_tokens or 0) / 1_000_000.0) * rate, 6)
+        if "gpt-6-luna" in model_name:
+            return round((float(input_tokens or 0) / 1_000_000.0) * 0.10, 6)
         if "gpt-5.6-luna" in model_name:
             return round((float(input_tokens or 0) / 1_000_000.0) * 0.20, 6)
         if "gpt-5.6-terra" in model_name:
@@ -2097,7 +2099,7 @@ class Assistant:
 
     def _apply_proactive_output_cap(self, payload):
         model_name = str((payload or {}).get("model") or self.model or "").lower()
-        if "gpt-5" not in model_name:
+        if not any(version in model_name for version in ("gpt-5", "gpt-6")):
             return False
         if not isinstance(payload, dict):
             return False
