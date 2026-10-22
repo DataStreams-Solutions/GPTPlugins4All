@@ -1,4 +1,5 @@
 from GPTPlugins4All.assistant import Assistant
+import pytest
 
 
 FUNCTION_TOOL = {
@@ -11,7 +12,7 @@ FUNCTION_TOOL = {
 }
 
 
-def _assistant(model="gpt-5.6-luna"):
+def _assistant(model="gpt-6-luna"):
     assistant = object.__new__(Assistant)
     assistant.model = model
     assistant.chat_base_url = ""
@@ -29,17 +30,19 @@ def _payload(model, *, tools=None, reasoning_effort="__omitted__"):
     return payload
 
 
-def test_luna_function_tools_default_reasoning_effort_is_explicitly_none():
+@pytest.mark.parametrize("model", ["gpt-5.6-luna", "gpt-6-luna"])
+def test_luna_function_tools_default_reasoning_effort_is_explicitly_none(model):
     payload = _assistant()._prepare_chat_payload(
-        _payload("gpt-5.6-luna", tools=[FUNCTION_TOOL])
+        _payload(model, tools=[FUNCTION_TOOL])
     )
 
     assert payload["reasoning_effort"] == "none"
 
 
-def test_luna_alias_function_tools_override_reasoning_effort_to_none():
+@pytest.mark.parametrize("model", ["openai/gpt-5.6-luna", "openai/gpt-6-luna"])
+def test_luna_alias_function_tools_override_reasoning_effort_to_none(model):
     payload = _assistant()._prepare_chat_payload(
-        _payload("openai/gpt-5.6-luna", tools=[FUNCTION_TOOL], reasoning_effort="high")
+        _payload(model, tools=[FUNCTION_TOOL], reasoning_effort="high")
     )
 
     assert payload["reasoning_effort"] == "none"
@@ -110,3 +113,17 @@ def test_streaming_preserves_usage_options():
     payload.update(stream=True, stream_options={"include_usage": True})
     prepared = _assistant()._prepare_chat_payload(payload)
     assert prepared["stream_options"] == {"include_usage": True}
+
+
+def test_gpt6_luna_uses_completion_token_parameter_and_current_cost():
+    assistant = _assistant()
+    assistant.chat_completion_defaults = {}
+    assistant.max_completion_tokens = 256
+    assistant.max_tokens = None
+
+    payload = assistant._build_chat_data({"model": "gpt-6-luna"})
+
+    assert payload["max_completion_tokens"] == 256
+    assert "max_tokens" not in payload
+    assert assistant._image_fallback_model() == "gpt-6-luna"
+    assert assistant._estimate_input_cost_usd("gpt-6-luna", 1_000_000) == 0.10
